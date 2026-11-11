@@ -1,0 +1,108 @@
+# Wolf3D Remake — Master Plan
+
+Clean-room modern engine remake of Wolfenstein 3D. No original source code is
+used; all formats are derived from the shipped binaries/data files and verified
+empirically (pixel/audio golden checks) before any consumer is built.
+
+## Source material (on-disk, read-only)
+
+Install root: `C:\Program Files (x86)\Steam\steamapps\common\Wolfenstein 3D`
+
+| Path | What it is |
+|---|---|
+| `base/wolf3d.exe` | GOG/Steam modern port executable (reference only, not linked) |
+| `base/*.WL6` | GOG `TED5v1.0` container data — main game (episodes 1–2) |
+| `base/m1/Spear.exe` | Original 1992 DOS executable, LZEXE 0.91 packed (Spear of Destiny) |
+| `base/m1/*.SOD` | Spear of Destiny data; mixed flavors: `GAMEMAPS.SOD` is TED5, `VGAGRAPH.SOD` is raw/wrapped — flavor determined per file in phase 1 |
+| `DOSBox/` | DOSBox 0.74-3 + `wolf3d.conf` (reference for original behavior) |
+
+Game data is read from the install directory at runtime (path via config).
+The repo never stores the full game assets.
+
+## Stack
+
+- C++23, MSVC arm64 (host is Windows ARM64).
+- CMake build; build tree lives OUTSIDE the repo at
+  `C:\Users\NumbaWon\wolf3d-build` (repo holds finished code only).
+- SDL3 (windowing, input) — prebuilt arm64.
+- Vulkan (renderer): compute raycaster.
+- miniaudio (audio, single header).
+- No other dependencies.
+
+## Renderer design (Vulkan compute raycaster)
+
+Original Wolf3D renderer: per-scanline DDA ray march over a 16x16 sector
+grid, 8 fixed wall directions per sector, 4-bit (16-color) tiles, 8-bit WAD
+textures, per-pixel distance fog, billboarded sprites.
+
+Vulkan mapping:
+- One compute invocation per output pixel (or 2x2 tile for headroom).
+- Map in a storage buffer: per sector, 8 wall entries (texture id, offset,
+  flags) + type; world coords in float32 (original fixed-point converted once).
+- Wall pass: DDA until sector boundary, sample texture atlas (any resolution,
+  mipmapped, linear) with u/v derived from hit wall and distance.
+- Floor/ceiling pass: project floor/ceiling planes onto the scanline, distance
+  fog mix (replaces the original 24-palette fog table; visually equivalent).
+- Sprite pass: per-actor billboards, depth-tested after wall pass,
+  sorted batch.
+- HiDPI: integer-scaled offscreen render target, present scaled to window;
+  optional smoothing for non-integer.
+- Hi-res texture hook: textures are an asset-side RGBA atlas; the renderer is
+  resolution-agnostic. Original 4/8-bit sources are expanded to RGBA at load
+  using the shipped palette.
+
+## Audio design
+
+- Original: 8-bit mono chunks in AUDIOT (per-chunk rate, to be pinned in
+  phase 1); music via OPL FM data (to be located in the containers).
+- Pipeline: miniaudio mixer; decode chunks to 16-bit float32 internal;
+  resampling stage accepts ANY input rate/width — the hi-res audio hook.
+- SFX: positional (pan by angle, volume by distance) per original behavior.
+
+## Repo layout
+
+```
+src/
+  core/      fixed-point, math, logging, config
+  data/      container readers (ted5, classic lump, raw), asset models
+  game/      map model, actors, simulation, state
+  render/    vulkan device, raycaster shaders, framebuffer, present
+  audio/     mixer, chunks, positional playback
+  app/       main loop, scenes (game, menu, hud)
+tests/       C++ unit + golden-file tests (small fixtures only)
+tools/       Python analysis scripts used to pin formats (kept as docs-of-record)
+docs/        plan, format write-ups
+```
+
+## Phases (one branch each, pushed at boundary, merged on user go-ahead)
+
+1. `phase-1-data-formats` — pin TED5 + raw flavors, map/audio/tile formats;
+   C++ `data` layer with golden tests; pixel/audio dumps as evidence.
+   ACCEPT: every container decodes cleanly to end-of-file; tile atlas PNG and
+   decoded audio WAV match the original by eye/ear; MAPHEAD→GAMEMAPS
+   cross-reference holds for all maps.
+2. `phase-2-game-simulation` — map model, actor definitions, headless
+   simulation: level load, LOS, movement, doors, triggers.
+   ACCEPT: headless test run walks each map without crashes; deterministic
+   tick output.
+3. `phase-3-render` — Vulkan raycaster + SDL3 window; walls, floors, sprites,
+   fog; HiDPI.
+   ACCEPT: screenshot comparison against reference (DOSBox/modern port)
+   scenes is visually faithful.
+4. `phase-4-audio` — mixer, SFX, music.
+   ACCEPT: audible, correctly positioned; resampling hook demonstrated with
+   a 16-bit/44.1k drop-in.
+5. `phase-5-ui-hud` — HUD, menus, messages, high scores, input (kb + gamepad).
+   ACCEPT: full play loop of one episode start→death→restart.
+6. `phase-6-polish` — widescreen, config, save games, hi-res asset pipeline
+   documentation + hooks.
+   ACCEPT: episode playable start-to-end with clean performance.
+
+## Rules
+
+- Phase-based branch names, no acronyms.
+- No agent scratch/build folders in the repo.
+- Clean-room: no original code; format knowledge from files + public docs,
+  always empirically verified.
+- Security/efficiency conscious: no network in the engine, no unsafe code,
+  bounded allocations.

@@ -1,0 +1,12 @@
+# Build tree lives outside the repo (C:\Users\NumbaWon\wolf3d-build).
+# Nothing build-related belongs in this repo.
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+CMakeUserPresets.json
+.vs/
+.idea/
+__pycache__/
+*.pyc
