@@ -22,8 +22,8 @@ The repo never stores the full game assets.
 ## Stack
 
 - C++23, MSVC arm64 (host is Windows ARM64).
-- CMake build; build tree lives OUTSIDE the repo at
-  `C:\Users\NumbaWon\wolf3d-build` (repo holds finished code only).
+- CMake build; artifacts go to the in-repo, gitignored `.build/` folder
+  (nothing build-related is tracked; nothing is written outside the repo).
 - SDL3 (windowing, input) — prebuilt arm64.
 - Vulkan (renderer): compute raycaster.
 - miniaudio (audio, single header).
@@ -81,6 +81,12 @@ docs/        plan, format write-ups
    ACCEPT: every container decodes cleanly to end-of-file; tile atlas PNG and
    decoded audio WAV match the original by eye/ear; MAPHEAD→GAMEMAPS
    cross-reference holds for all maps.
+   **DONE (2026-11-11, c230f1a)** — 173 golden checks green: all 81 maps
+   (MAPHEAD cross-reference holds), 106 walls + 436 sprites + 86 SFX decode
+   to end-of-file; sprite 110 pixel-verified 888/956 vs external reference
+   (residual = 2 GOG-remaster palette entries). Deferred to later phases,
+   documented in formats.md: VGAGRAPH/VGAHEAD (Phase 5), OPL FM music
+   (Phase 4).
 2. `phase-2-game-simulation` — map model, actor definitions, headless
    simulation: level load, LOS, movement, doors, triggers.
    ACCEPT: headless test run walks each map without crashes; deterministic
@@ -98,10 +104,38 @@ docs/        plan, format write-ups
    documentation + hooks.
    ACCEPT: episode playable start-to-end with clean performance.
 
+## Phase 2 kickoff (next session starts here)
+
+Branch: `phase-2-game-simulation` from main (Phase 1 merged first).
+
+Reference engine (public clean-room JS reimplementation — NOT ID source;
+safe under the clean-room rule). Scratch copies may be pruned, re-fetch:
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/game.js   (game logic: player, enemies, doors, pickups — the Phase 2 source of truth)
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/engine.js (graphics; verified against our sprite/wall decodes)
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/files.js  (file parsing)
+
+Work order:
+1. Map model on `w3d::GameMaps` (planes already decode): 64×64 grid;
+   plane0 = wall/open texture indices (0..143), plane1 = objects/actors
+   (0..259; values 256..259 observed across all 81 maps as door/exit
+   markers). Derive exact value semantics (which plane0 values are walls
+   vs open, plane1 ID → actor mapping) empirically from game.js.
+2. Actor/object definitions as data (id → sprite, health, behavior table)
+   derived from game.js; every behavior backed by a golden test.
+3. Headless sim: fixed tick, player state, movement + collision vs
+   plane0, LOS raycast, doors, triggers. Deterministic — tick output is
+   the golden fixture (like Phase 1's golden.json, kept in scratch).
+4. Keep the golden suite green at every step; add sim tests to
+   tests/ as a second executable or a new test file.
+
+ACCEPT: headless test run walks each of the 81 maps without crashes;
+deterministic tick output (byte-identical across runs).
+
 ## Rules
 
 - Phase-based branch names, no acronyms.
-- No agent scratch/build folders in the repo.
+- Build/scratch artifacts go to the gitignored `.build/` folder — never
+  tracked, never outside the repo.
 - Clean-room: no original code; format knowledge from files + public docs,
   always empirically verified.
 - Security/efficiency conscious: no network in the engine, no unsafe code,

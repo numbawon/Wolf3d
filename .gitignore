@@ -1,5 +1,6 @@
-# Build tree lives outside the repo (C:\Users\NumbaWon\wolf3d-build).
-# Nothing build-related belongs in this repo.
+# All build artifacts live in the in-repo, gitignored .build/ folder.
+# Nothing build-related is ever tracked.
+.build/
 *.obj
 *.pdb
 *.ilk
