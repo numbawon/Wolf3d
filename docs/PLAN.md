@@ -22,8 +22,8 @@ The repo never stores the full game assets.
 ## Stack
 
 - C++23, MSVC arm64 (host is Windows ARM64).
-- CMake build; build tree lives OUTSIDE the repo at
-  `C:\Users\NumbaWon\wolf3d-build` (repo holds finished code only).
+- CMake build; artifacts go to the in-repo, gitignored `.build/` folder
+  (nothing build-related is tracked; nothing is written outside the repo).
 - SDL3 (windowing, input) — prebuilt arm64.
 - Vulkan (renderer): compute raycaster.
 - miniaudio (audio, single header).
@@ -107,7 +107,8 @@ docs/        plan, format write-ups
 ## Rules
 
 - Phase-based branch names, no acronyms.
-- No agent scratch/build folders in the repo.
+- Build/scratch artifacts go to the gitignored `.build/` folder — never
+  tracked, never outside the repo.
 - Clean-room: no original code; format knowledge from files + public docs,
   always empirically verified.
 - Security/efficiency conscious: no network in the engine, no unsafe code,
