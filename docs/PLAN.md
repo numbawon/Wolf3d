@@ -81,6 +81,12 @@ docs/        plan, format write-ups
    ACCEPT: every container decodes cleanly to end-of-file; tile atlas PNG and
    decoded audio WAV match the original by eye/ear; MAPHEAD→GAMEMAPS
    cross-reference holds for all maps.
+   **DONE (2026-11-11, c230f1a)** — 173 golden checks green: all 81 maps
+   (MAPHEAD cross-reference holds), 106 walls + 436 sprites + 86 SFX decode
+   to end-of-file; sprite 110 pixel-verified 888/956 vs external reference
+   (residual = 2 GOG-remaster palette entries). Deferred to later phases,
+   documented in formats.md: VGAGRAPH/VGAHEAD (Phase 5), OPL FM music
+   (Phase 4).
 2. `phase-2-game-simulation` — map model, actor definitions, headless
    simulation: level load, LOS, movement, doors, triggers.
    ACCEPT: headless test run walks each map without crashes; deterministic
