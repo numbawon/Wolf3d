@@ -104,6 +104,33 @@ docs/        plan, format write-ups
    documentation + hooks.
    ACCEPT: episode playable start-to-end with clean performance.
 
+## Phase 2 kickoff (next session starts here)
+
+Branch: `phase-2-game-simulation` from main (Phase 1 merged first).
+
+Reference engine (public clean-room JS reimplementation — NOT ID source;
+safe under the clean-room rule). Scratch copies may be pruned, re-fetch:
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/game.js   (game logic: player, enemies, doors, pickups — the Phase 2 source of truth)
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/engine.js (graphics; verified against our sprite/wall decodes)
+- https://raw.githubusercontent.com/vpoupet/wolfenstein/master/js/files.js  (file parsing)
+
+Work order:
+1. Map model on `w3d::GameMaps` (planes already decode): 64×64 grid;
+   plane0 = wall/open texture indices (0..143), plane1 = objects/actors
+   (0..259; values 256..259 observed across all 81 maps as door/exit
+   markers). Derive exact value semantics (which plane0 values are walls
+   vs open, plane1 ID → actor mapping) empirically from game.js.
+2. Actor/object definitions as data (id → sprite, health, behavior table)
+   derived from game.js; every behavior backed by a golden test.
+3. Headless sim: fixed tick, player state, movement + collision vs
+   plane0, LOS raycast, doors, triggers. Deterministic — tick output is
+   the golden fixture (like Phase 1's golden.json, kept in scratch).
+4. Keep the golden suite green at every step; add sim tests to
+   tests/ as a second executable or a new test file.
+
+ACCEPT: headless test run walks each of the 81 maps without crashes;
+deterministic tick output (byte-identical across runs).
+
 ## Rules
 
 - Phase-based branch names, no acronyms.
