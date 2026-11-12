@@ -30,6 +30,17 @@ else()
   target_compile_options(w3d_data PRIVATE -Wall -Wextra)
 endif()
 
+# Phase 2: headless game simulation on the data layer.
+add_library(w3d_game STATIC
+    src/game/actors.cpp
+    src/game/level.cpp
+    src/game/sim.cpp)
+target_link_libraries(w3d_game PUBLIC w3d_data)
+target_include_directories(w3d_game PUBLIC src)
+if(MSVC)
+  target_compile_options(w3d_game PRIVATE /W4 /permissive- /utf-8)
+endif()
+
 if(W3D_BUILD_TESTS)
   enable_testing()
   add_executable(w3d_tests tests/test_formats.cpp)
@@ -40,4 +51,13 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME formats COMMAND w3d_tests)
+
+  add_executable(w3d_sim_tests tests/test_sim.cpp)
+  target_link_libraries(w3d_sim_tests PRIVATE w3d_game)
+  target_compile_definitions(w3d_sim_tests PRIVATE
+      W3D_GAME_DIR_DEFAULT="${W3D_GAME_DIR}")
+  if(MSVC)
+    target_compile_options(w3d_sim_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME sim COMMAND w3d_sim_tests)
 endif()

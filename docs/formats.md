@@ -192,9 +192,73 @@ for VSWAP rendering. Deferred.
 522 bytes: `"id software-'92"` + NUL padding + a few small values (0x70, 1…).
 Version/config marker only. Deferred until options/menus are needed.
 
+## Map plane value semantics (pinned in Phase 2)
+
+Derived from the reference engine (vpoupet/wolfenstein `game.js`, a public
+clean-room reimplementation) and cross-checked against the public map-format
+tables (reference repo `docs/files.md`, 1999 XWolf "Map Data Values") and the
+shipped data via `tools/analyze_maps.py`.
+
+Plane 0 (wall/walkable):
+- `0..63`   wall (blocking). Texture = value (walls live in VSWAP 0..105;
+  values 64..101 that appear in plane 0 use the wall index directly, e.g.
+  value 21 renders wall texture 40 — the elevator-shaft shaft).
+- `90..101` doors (blocking while closed, 64-tick open/close cycle).
+  90/91 plain, 92/93 gold-locked, 94/95 silver-locked, 96..101 plain.
+- `>63` and not a door (102..143 observed) = open floor.
+- `21` is the elevator-shaft wall: activating (pressing "use") with the
+  shaft cell in front and the x-axis dominant exits the level.
+
+Plane 1 (objects/actors):
+- `19..22`  player spawn, facing N/E/S/W.
+- `23..70`  props, sprite = value − 21; most walk-through, 21 of them
+  blocking (see `src/game/actors.cpp` `kBlockingProps`); collectibles are
+  29 (ammo), 43/44 (gold/silver key), 47..51 (health/ammo), 52..56 (treasures,
+  counted in the score).
+- `98`      pushwall (secret): 2 × 64-tick cell move; counts in totalSecrets.
+- `108..141, 144..177, 216..223, 234..241` regular enemies, 8 values per
+  band (0-3 standing, 4-7 patrolling — behaviorally identical in the
+  reference: enemies are static). Direction = (value − band base) % 4,
+  except the 216-223 zombie band, which the reference computes as
+  (value − 116) % 4 (mirrored in `actor_direction`).
+- `124`     dead guard (decorative sprite 95).
+- `160, 178, 179, 196, 197, 214, 215` bosses (always face the player).
+- `224..227` pac-man ghosts, 2-frame loop, not killable.
+- `256..259` special markers (see the Phase 1 note); inert in the simulation.
+- `71..74` (SoD static objects), `106, 107, 125, 142, 143, 161` (SoD
+  enemies with no reference class), `180..213` (hard-difficulty regulars)
+  and `252..259` (hard-difficulty mutants) are present in the shipped data
+  but unhandled by the reference → inert (`kUnknown`).
+
+UNRESOLVED: `90..97, 99` in plane 1. Present in both games (1621 base /
+548 SOD cells) in small clusters of 8 subtypes on open cells, often near
+enemies; not documented in any public spec found and not handled by the
+reference. Treated as inert; re-check in the Phase 3 screenshot comparison.
+
+## Simulation simplifications (Phase 2)
+
+The headless sim (`src/game/sim.*`) mirrors the reference update loop with
+these deliberate differences, each pinned by a golden test in
+`tests/test_sim.cpp`:
+
+- The reference fires activate/shoot from key events; the sim processes the
+  per-tick input flags at a fixed point (after movement), so a held
+  "activate" re-triggers once per tick (an open door re-closes if the press
+  is still held on the tick it opens — key-event input never does that).
+- Enemies have no AI (true of the reference): they stand facing their spawn
+  direction and die in one shot via the center ray (|perpendicular offset|
+  ≤ 0.3, no spread, no hitpoints).
+- The LOS ray is a grid DDA over blocking cells (walls, closed doors,
+  blocking props, map bounds) — the boundary convention is equivalent to the
+  reference's door-center-line geometry for all killable cases.
+- m1 90..99 cells are inert (see above).
+- Level exit freezes the player (reference: loads the next level).
+
 ## Open items (do NOT block the renderer)
 
 1. VGAGRAPH/VGAHEAD exact layout (Phase 5 — HUD & menus).
 2. OPL FM music section structure (Phase 4 — music; SFX is fully solved).
 3. Meaning of VGADICT table (Phase 5, if 4-bit tiles ever needed).
 4. The 3 mystery bytes after the GAMEMAPS magic.
+5. Plane 1 values 90..97/99 (inert in the sim; see "Map plane value
+   semantics" — check rendering in Phase 3).
