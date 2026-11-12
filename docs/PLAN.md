@@ -91,6 +91,13 @@ docs/        plan, format write-ups
    simulation: level load, LOS, movement, doors, triggers.
    ACCEPT: headless test run walks each map without crashes; deterministic
    tick output.
+   **DONE (2026-11-11, 17baff7)** — 327 golden checks green: plane value
+   semantics pinned against the reference engine + public docs (see
+   formats.md "Map plane value semantics"); headless sim with 64-tick door
+   cycles, key locks, 2x64-tick pushwalls, grid-DDA LOS, one-shot static
+   enemies, elevator exit; acceptance walk of all 81 maps x 2000 ticks with
+   byte-identical deterministic transcripts and no crashes. Unresolved,
+   documented: plane1 90-97/99 (inert; Phase 3 screenshot check).
 3. `phase-3-render` — Vulkan raycaster + SDL3 window; walls, floors, sprites,
    fog; HiDPI.
    ACCEPT: screenshot comparison against reference (DOSBox/modern port)
