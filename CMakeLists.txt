@@ -99,6 +99,7 @@ if(W3D_BUILD_RENDER)
   endif()
 
   add_library(w3d_render STATIC
+      src/render/frame.cpp
       src/render/renderer.cpp
       src/render/window.cpp
       src/util/bmp.cpp)
@@ -106,7 +107,7 @@ if(W3D_BUILD_RENDER)
       PUBLIC src
       SYSTEM PUBLIC "${W3D_SDL3_DIR}"
       SYSTEM PUBLIC "${W3D_DEPS_DIR}/vulkan")
-  target_link_libraries(w3d_render PUBLIC
+  target_link_libraries(w3d_render PUBLIC w3d_game
       "${W3D_SDL3_LIB}" "${W3D_VULKAN_LOADER_LIB}")
   target_compile_definitions(w3d_render PUBLIC
       VK_USE_PLATFORM_WIN32_KHR NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -133,16 +134,28 @@ if(W3D_BUILD_RENDER)
     endforeach()
     add_custom_target(${target}_shaders DEPENDS ${spvs})
     add_dependencies(${target} ${target}_shaders)
-    add_custom_command(TARGET ${target} POST_BUILD
+    # Copy the .spv files next to the executable. This must be a stamp-based
+    # custom command, NOT a POST_BUILD step: POST_BUILD only runs when the
+    # target relinks, so a shader-only edit would leave stale .spv files in
+    # the runtime directory (the app loads from there).
+    set(shader_stamp "${CMAKE_BINARY_DIR}/generated/shaders/${target}_copied")
+    add_custom_command(
+        OUTPUT ${shader_stamp}
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_BINARY_DIR}/generated/shaders"
-            "$<TARGET_FILE_DIR:${target}>/shaders")
+            "$<TARGET_FILE_DIR:${target}>/shaders"
+        COMMAND ${CMAKE_COMMAND} -E touch ${shader_stamp}
+        DEPENDS ${spvs}
+        COMMENT "copy ${target} shaders to runtime dir"
+        VERBATIM)
+    add_custom_target(${target}_shader_copy DEPENDS ${shader_stamp})
+    add_dependencies(${target} ${target}_shader_copy)
   endfunction()
 
-  # Game application (M2: window + test pattern).
+  # Game application (M3: simulation + raycast renderer).
   add_executable(w3d_app src/main.cpp)
-  target_link_libraries(w3d_app PRIVATE w3d_render)
-  w3d_add_shaders(w3d_app clear.comp)
+  target_link_libraries(w3d_app PRIVATE w3d_render w3d_game)
+  w3d_add_shaders(w3d_app walls.comp sprites.comp)
   if(MSVC)
     target_compile_options(w3d_app PRIVATE /W4 /permissive- /utf-8)
   endif()

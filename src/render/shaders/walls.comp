@@ -1,0 +1,85 @@
+// w3d render/shaders/walls.comp — wall/floor/ceiling pass.
+//
+// One invocation per screen column (320 local invocations in a single
+// workgroup; each invocation loops over the column's 200 rows itself).
+// The CPU (frame.cpp) already ran the reference grid DDA and stored
+// (t, h, tx, tex) per column; this pass ports the reference drawWalls
+// output stage exactly: ceiling (palette 29) and floor (palette 25) plus
+// the 64-texel wall strip with the reference's yf/stepf accumulation, so
+// the texel-to-row mapping is identical to the JS.
+//
+// Driver workarounds (RTX Spark N1X, ARM64 Vulkan driver, 2026-11-12):
+// - `v & 0xFF` is miscompiled into a nonzero-test (yields 0 or 255); every
+//   byte extraction / low-byte index uses % 256u and / 256u instead.
+// - uvec4 imageStore on R8G8B8A8 storage images is quantized per component
+//   to {0, 255}; the float vec4 path with (v + 0.5) / 255.0 is correct
+//   (both proven by differential renders, see docs/phase-3-status.md).
+#version 460
+
+layout(local_size_x = 320) in;
+
+struct Col {
+    double t;
+    double h;
+    double tx;
+    uint tex;
+};
+layout(set = 0, binding = 0) buffer Columns { Col columns[320]; } cb;
+
+layout(set = 0, binding = 1) buffer WallAtlas { uint texel[]; };
+layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
+layout(set = 0, binding = 6, rgba8) uniform writeonly image2D screen;
+
+void main() {
+    uint x = gl_LocalInvocationID.x;
+    Col c = cb.columns[x];
+    double h = c.h;                 // wall half-height in px (wallHeight/2t)
+    double top = 100.0 - h;         // wall top edge (reference H/2 - h)
+    double fbot = floor(top + 2.0 * h);  // first floor row (reference: 199-yi0)
+    double s = h / 32.0;            // px per texel (reference h/32)
+    double stepi = floor(s);        // integer rows per texel
+    double stepf = s - stepi;       // fractional remainder
+    uint texcol = uint(floor(64.0 * c.tx));  // reference ~~(64 * tx)
+    // Wall atlas is row-major (row*64+col); the reference reads the 64
+    // texels of column texcol top to bottom.
+    uint base = c.tex * 4096u + texcol;
+
+    // Default fill: ceiling above the wall's union, floor below. The wall
+    // pass below overwrites exactly the union rows [max(0, floor(top)),
+    // min(200, fbot)), so the default only shows outside it.
+    uint rows[200];
+    for (uint row = 0u; row < 200u; ++row)
+        rows[row] = (double(row) < fbot) ? color[29] : color[25];
+
+    // Reference 64-texel vertical DDA. yi/yf start at the wall's top edge
+    // (reference: yi = ~~(H/2 - h), yf = (H/2 - h) % 1).
+    double yi = floor(top);
+    double yf = top - floor(top);
+    for (uint j = 0u; j < 64u; ++j) {
+        // DRIVERS BUG (2026-11-12): this ARM64 Vulkan driver miscompiles
+        // `v & 0xFF` into a nonzero-test (0 or 0xFF). Use % 256 arithmetic
+        // for every byte extraction / low-byte index in this project.
+        uint px = color[texel[base + j * 64u] % 256u];
+        yf += stepf;
+        double n = stepi;
+        if (yf >= 1.0) {
+            n = stepi + 1.0;
+            yf -= 1.0;
+        }
+        for (double k = 0.0; k < n; ++k) {
+            double r = yi + k;
+            if (r >= 0.0 && r < 200.0)
+                rows[int(r)] = px;
+        }
+        yi += n;
+    }
+
+    for (uint row = 0u; row < 200u; ++row) {
+        uint pxv = rows[row];
+        imageStore(screen, ivec2(int(x), int(row)),
+                   vec4((float(pxv % 256u) + 0.5) / 255.0,
+                        (float((pxv / 256u) % 256u) + 0.5) / 255.0,
+                        (float((pxv / 65536u) % 256u) + 0.5) / 255.0,
+                        1.0));
+    }
+}

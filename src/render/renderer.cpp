@@ -1,11 +1,14 @@
-// src/render/renderer.cpp — Vulkan device/swapchain/compute pipeline (M2).
+// src/render/renderer.cpp — Vulkan device/swapchain/compute pipelines (M3).
 #include "renderer.hpp"
 
 #include <vulkan/vulkan_win32.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <utility>
 
 #include "vk_common.hpp"
 
@@ -117,7 +120,48 @@ VkSurfaceCapabilitiesKHR pick_caps(VkPhysicalDevice d, VkSurfaceKHR surface) {
     return caps;
 }
 
+// Per-frame sub-region offsets inside the dynamic buffer.
+constexpr uint64_t kColumnsOff = 0;
+constexpr uint64_t kSpritesOff = 16384;
+constexpr uint64_t kPaletteOff = 32768;
+constexpr uint64_t kCountOff = 33792;
+constexpr uint64_t kFrameBufSize = 33796;
+
+// CPU-side record layouts (must match the GLSL struct layouts exactly).
+struct ColumnUpload {
+    double t, h, tx;
+    std::uint32_t tex;
+    std::uint32_t pad;
+};
+struct SpriteUpload {
+    double x0, y0, s, dist;
+    std::uint32_t scale;
+    std::uint32_t sprite;
+};
+static_assert(sizeof(ColumnUpload) == 32);
+static_assert(offsetof(ColumnUpload, tex) == 24);
+static_assert(sizeof(SpriteUpload) == 40);
+static_assert(offsetof(SpriteUpload, scale) == 32);
+
 } // namespace
+
+uint32_t Renderer::alloc_mem(const VkMemoryRequirements& mr, uint32_t want_bits,
+                             VkDeviceMemory& out) {
+    VkPhysicalDeviceMemoryProperties mprops{};
+    vkGetPhysicalDeviceMemoryProperties(physical_, &mprops);
+    uint32_t type = 0;
+    for (; type < mprops.memoryTypeCount; ++type)
+        if (mr.memoryTypeBits & (1u << type))
+            if (mprops.memoryTypes[type].propertyFlags & want_bits)
+                break;
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = type;
+    if (vkAllocateMemory(device_, &ai, nullptr, &out) != VK_SUCCESS)
+        vk_fail("vkAllocateMemory", VK_ERROR_OUT_OF_HOST_MEMORY);
+    return type;
+}
 
 Renderer::Renderer(Window& window, VkInstance instance)
     : window_(window), instance_(instance) {
@@ -141,6 +185,22 @@ Renderer::Renderer(Window& window, VkInstance instance)
     if (vkCreateDevice(physical_, &dci, nullptr, &device_) != VK_SUCCESS)
         vk_fail("vkCreateDevice", VK_ERROR_INITIALIZATION_FAILED);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+    VkPhysicalDeviceProperties pprops{};
+    vkGetPhysicalDeviceProperties(physical_, &pprops);
+    std::fprintf(stderr,
+                 "GPU: %s  sharedMemMax=%llu invocationsMax=%llu wgMax=(%llu,%llu,%llu) wgSizeMax=(%llu,%llu,%llu)\n",
+                 pprops.deviceName,
+                 (unsigned long long)pprops.limits.maxComputeSharedMemorySize,
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupInvocations,
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupCount[0],
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupCount[1],
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupCount[2],
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupSize[0],
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupSize[1],
+                 (unsigned long long)pprops.limits.maxComputeWorkGroupSize[2]);
+    buf_align_ = std::max<uint64_t>(
+        64, std::max(pprops.limits.minStorageBufferOffsetAlignment,
+                     pprops.limits.minUniformBufferOffsetAlignment));
 
     // ---- Internal image (kInternalW x kInternalH, RGBA8, storage + blit src)
     VkImageCreateInfo ii{};
@@ -152,27 +212,13 @@ Renderer::Renderer(Window& window, VkInstance instance)
     ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-               VK_IMAGE_USAGE_SAMPLED_BIT;
+    ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(device_, &ii, nullptr, &img_) != VK_SUCCESS)
         vk_fail("vkCreateImage(internal)", VK_ERROR_INITIALIZATION_FAILED);
     VkMemoryRequirements mr{};
     vkGetImageMemoryRequirements(device_, img_, &mr);
-    VkPhysicalDeviceMemoryProperties mprops{};
-    vkGetPhysicalDeviceMemoryProperties(physical_, &mprops);
-    uint32_t type = 0;
-    for (; type < mprops.memoryTypeCount; ++type)
-        if (mr.memoryTypeBits & (1u << type))
-            if (mprops.memoryTypes[type].propertyFlags &
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-                break;
-    VkMemoryAllocateInfo ai{};
-    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex = type;
-    if (vkAllocateMemory(device_, &ai, nullptr, &img_mem_) != VK_SUCCESS)
-        vk_fail("vkAllocateMemory(internal)", VK_ERROR_OUT_OF_HOST_MEMORY);
+    alloc_mem(mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, img_mem_);
     vkBindImageMemory(device_, img_, img_mem_, 0);
     VkImageViewCreateInfo ivi{};
     ivi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -194,91 +240,149 @@ Renderer::Renderer(Window& window, VkInstance instance)
     if (vkCreateBuffer(device_, &bi, nullptr, &staging_) != VK_SUCCESS)
         vk_fail("vkCreateBuffer(staging)", VK_ERROR_INITIALIZATION_FAILED);
     vkGetBufferMemoryRequirements(device_, staging_, &mr);
-    type = 0;
-    for (; type < mprops.memoryTypeCount; ++type)
-        if (mr.memoryTypeBits & (1u << type))
-            if (mprops.memoryTypes[type].propertyFlags &
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-                break;
-    ai = {};
-    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex = type;
-    if (vkAllocateMemory(device_, &ai, nullptr, &staging_mem_) != VK_SUCCESS)
-        vk_fail("vkAllocateMemory(staging)", VK_ERROR_OUT_OF_HOST_MEMORY);
+    alloc_mem(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, staging_mem_);
     vkBindBufferMemory(device_, staging_, staging_mem_, 0);
 
-    // ---- Clear compute pipeline
-    const auto spv = load_file(exe_dir() / "shaders" / "clear.spv");
-    VkShaderModuleCreateInfo smci{};
-    smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smci.codeSize = spv.size();
-    smci.pCode = reinterpret_cast<const uint32_t*>(spv.data());
-    if (vkCreateShaderModule(device_, &smci, nullptr, &clear_mod_) != VK_SUCCESS)
-        vk_fail("vkCreateShaderModule(clear)", VK_ERROR_INITIALIZATION_FAILED);
-    VkDescriptorSetLayoutBinding bind{};
-    bind.binding = 0;
-    bind.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bind.descriptorCount = 1;
-    bind.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // TEMP DEBUG: host visible mirror of the frame buffer, filled by a GPU
+    // copy, so we can see what the GPU actually reads.
+    bi.size = kFrameBufSize;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateBuffer(device_, &bi, nullptr, &dbg_buf_) != VK_SUCCESS)
+        vk_fail("vkCreateBuffer(dbg)", VK_ERROR_INITIALIZATION_FAILED);
+    vkGetBufferMemoryRequirements(device_, dbg_buf_, &mr);
+    alloc_mem(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, dbg_mem_);
+    vkBindBufferMemory(device_, dbg_buf_, dbg_mem_, 0);
+
+    // ---- Per-frame dynamic buffer (host visible, permanently mapped)
+    bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = kFrameBufSize;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (vkCreateBuffer(device_, &bi, nullptr, &frame_buf_) != VK_SUCCESS)
+        vk_fail("vkCreateBuffer(frame)", VK_ERROR_INITIALIZATION_FAILED);
+    vkGetBufferMemoryRequirements(device_, frame_buf_, &mr);
+    alloc_mem(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, frame_mem_);
+    vkBindBufferMemory(device_, frame_buf_, frame_mem_, 0);
+    if (vkMapMemory(device_, frame_mem_, 0, VK_WHOLE_SIZE, 0, &frame_map_) !=
+        VK_SUCCESS)
+        vk_fail("vkMapMemory(frame)", VK_ERROR_MEMORY_MAP_FAILED);
+
+    // ---- Pipelines (shared descriptor layout)
+    VkDescriptorSetLayoutBinding binds[7]{};
+    for (uint32_t i = 0; i < 7; ++i) {
+        binds[i].binding = i;
+        binds[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        binds[i].descriptorCount = 1;
+        binds[i].descriptorType =
+            (i == 6) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                     : (i == 5) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslci.bindingCount = 1;
-    dslci.pBindings = &bind;
-    if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &clear_dsl_) !=
+    dslci.bindingCount = 7;
+    dslci.pBindings = binds;
+    if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &dsl_) !=
         VK_SUCCESS)
-        vk_fail("vkCreateDescriptorSetLayout(clear)",
-                VK_ERROR_INITIALIZATION_FAILED);
-    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};
+        vk_fail("vkCreateDescriptorSetLayout", VK_ERROR_INITIALIZATION_FAILED);
     VkPipelineLayoutCreateInfo plci{};
     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plci.setLayoutCount = 1;
-    plci.pSetLayouts = &clear_dsl_;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(device_, &plci, nullptr, &clear_layout_) !=
+    plci.pSetLayouts = &dsl_;
+    if (vkCreatePipelineLayout(device_, &plci, nullptr, &layout_) !=
         VK_SUCCESS)
-        vk_fail("vkCreatePipelineLayout(clear)", VK_ERROR_INITIALIZATION_FAILED);
-    VkComputePipelineCreateInfo cpci{};
-    cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    VkPipelineShaderStageCreateInfo stage{};
-    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = clear_mod_;
-    stage.pName = "main";
-    cpci.stage = stage;
-    cpci.layout = clear_layout_;
-    if (vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &cpci, nullptr,
-                                 &clear_pipe_) != VK_SUCCESS)
-        vk_fail("vkCreateComputePipelines(clear)", VK_ERROR_INITIALIZATION_FAILED);
-    // Descriptor set pointing at the internal image.
-    VkDescriptorPoolSize dps{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
+        vk_fail("vkCreatePipelineLayout", VK_ERROR_INITIALIZATION_FAILED);
+
+    auto make_pipe = [&](const char* spv_name, VkPipeline* out) {
+        const auto spv = load_file(exe_dir() / "shaders" / spv_name);
+        VkShaderModuleCreateInfo smci{};
+        smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smci.codeSize = spv.size();
+        smci.pCode = reinterpret_cast<const uint32_t*>(spv.data());
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device_, &smci, nullptr, &mod) !=
+            VK_SUCCESS)
+            vk_fail("vkCreateShaderModule", VK_ERROR_INITIALIZATION_FAILED);
+        VkComputePipelineCreateInfo cpci{};
+        cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        VkPipelineShaderStageCreateInfo stage{};
+        stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = mod;
+        stage.pName = "main";
+        cpci.stage = stage;
+        cpci.layout = layout_;
+        if (vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &cpci, nullptr,
+                                     out) != VK_SUCCESS)
+            vk_fail("vkCreateComputePipelines", VK_ERROR_INITIALIZATION_FAILED);
+        return mod;
+    };
+    walls_mod_ = make_pipe("walls.spv", &walls_pipe_);
+    sprites_mod_ = make_pipe("sprites.spv", &sprites_pipe_);
+
+    // ---- Descriptor set (buffer entries filled by load_atlases)
+    VkDescriptorPoolSize dps[7]{};
+    for (uint32_t i = 0; i < 6; ++i)
+        dps[i] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    dps[5] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    dps[6] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpci.maxSets = 1;
-    dpci.poolSizeCount = 1;
-    dpci.pPoolSizes = &dps;
-    if (vkCreateDescriptorPool(device_, &dpci, nullptr, &dpool_) != VK_SUCCESS)
-        vk_fail("vkCreateDescriptorPool(clear)", VK_ERROR_INITIALIZATION_FAILED);
-    VkDescriptorSetLayout dsls[1] = {clear_dsl_};
+    dpci.poolSizeCount = 7;
+    dpci.pPoolSizes = dps;
+    if (vkCreateDescriptorPool(device_, &dpci, nullptr, &dpool_) !=
+        VK_SUCCESS)
+        vk_fail("vkCreateDescriptorPool", VK_ERROR_INITIALIZATION_FAILED);
     VkDescriptorSetAllocateInfo dsa{};
     dsa.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     dsa.descriptorPool = dpool_;
     dsa.descriptorSetCount = 1;
-    dsa.pSetLayouts = dsls;
+    dsa.pSetLayouts = &dsl_;
     if (vkAllocateDescriptorSets(device_, &dsa, &dset_) != VK_SUCCESS)
-        vk_fail("vkAllocateDescriptorSets(clear)", VK_ERROR_OUT_OF_HOST_MEMORY);
-    VkDescriptorImageInfo dii{};
-    dii.imageView = img_view_;
-    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet wds{};
-    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds.dstSet = dset_;
-    wds.dstBinding = 0;
-    wds.descriptorCount = 1;
-    wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    wds.pImageInfo = &dii;
-    vkUpdateDescriptorSets(device_, 1, &wds, 0, nullptr);
+        vk_fail("vkAllocateDescriptorSets", VK_ERROR_OUT_OF_HOST_MEMORY);
+    {
+        // Image binding + the per-frame buffer bindings (atlas buffers get
+        // their ranges in load_atlases).
+        VkDescriptorImageInfo dii{};
+        dii.imageView = img_view_;
+        dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorBufferInfo binfo[6]{};
+        binfo[0].buffer = frame_buf_;  // columns
+        binfo[0].offset = kColumnsOff;
+        binfo[0].range = kSpritesOff - kColumnsOff;
+        binfo[1].buffer = VK_NULL_HANDLE;  // wall atlas (filled later)
+        binfo[2].buffer = VK_NULL_HANDLE;  // sprite atlas (filled later)
+        binfo[3].buffer = frame_buf_;      // palette
+        binfo[3].offset = kPaletteOff;
+        binfo[3].range = 1024;
+        binfo[4].buffer = frame_buf_;      // sprite records
+        binfo[4].offset = kSpritesOff;
+        binfo[4].range = 256u * 40;
+        binfo[5].buffer = frame_buf_;      // count
+        binfo[5].offset = kCountOff;
+        binfo[5].range = 4;
+        VkWriteDescriptorSet wds[7]{};
+        for (uint32_t i = 0; i < 6; ++i) {
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = dset_;
+            wds[i].dstBinding = i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = (i == 5)
+                ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &binfo[i];
+        }
+        wds[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[6].dstSet = dset_;
+        wds[6].dstBinding = 6;
+        wds[6].descriptorCount = 1;
+        wds[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        wds[6].pImageInfo = &dii;
+        vkUpdateDescriptorSets(device_, 7, wds, 0, nullptr);
+    }
 
     // ---- Synchronization + command pool
     VkSemaphoreCreateInfo sci{};
@@ -319,11 +423,27 @@ Renderer::~Renderer() {
         return;
     vkDeviceWaitIdle(device_);
     destroy_swapchain();
-    vkDestroyPipeline(device_, clear_pipe_, nullptr);
-    vkDestroyPipelineLayout(device_, clear_layout_, nullptr);
+    if (frame_map_)
+        vkUnmapMemory(device_, frame_mem_);
+    if (frame_mem_)
+        vkFreeMemory(device_, frame_mem_, nullptr);
+    if (frame_buf_)
+        vkDestroyBuffer(device_, frame_buf_, nullptr);
+    if (sprite_atlas_mem_)
+        vkFreeMemory(device_, sprite_atlas_mem_, nullptr);
+    if (sprite_atlas_)
+        vkDestroyBuffer(device_, sprite_atlas_, nullptr);
+    if (wall_atlas_mem_)
+        vkFreeMemory(device_, wall_atlas_mem_, nullptr);
+    if (wall_atlas_)
+        vkDestroyBuffer(device_, wall_atlas_, nullptr);
+    vkDestroyPipeline(device_, walls_pipe_, nullptr);
+    vkDestroyPipeline(device_, sprites_pipe_, nullptr);
+    vkDestroyPipelineLayout(device_, layout_, nullptr);
     vkDestroyDescriptorPool(device_, dpool_, nullptr);
-    vkDestroyDescriptorSetLayout(device_, clear_dsl_, nullptr);
-    vkDestroyShaderModule(device_, clear_mod_, nullptr);
+    vkDestroyDescriptorSetLayout(device_, dsl_, nullptr);
+    vkDestroyShaderModule(device_, walls_mod_, nullptr);
+    vkDestroyShaderModule(device_, sprites_mod_, nullptr);
     vkDestroyImageView(device_, img_view_, nullptr);
     vkDestroyImage(device_, img_, nullptr);
     vkFreeMemory(device_, img_mem_, nullptr);
@@ -399,37 +519,111 @@ void Renderer::destroy_swapchain() {
     }
 }
 
-bool Renderer::begin_frame() {
-    // Wait for the previous frame to finish before reusing fence/semaphores.
-    if (has_work_) {
-        const VkResult wr =
-            vkWaitForFences(device_, 1, &fence_, VK_TRUE, 1000000000ull);
-        if (wr != VK_SUCCESS)
-            return false;
-        vkResetFences(device_, 1, &fence_);
+void Renderer::load_atlases(
+    const std::vector<const std::array<std::uint8_t, 4096>*>& walls,
+    const std::vector<const std::array<std::uint8_t, 4096>*>& sprites) {
+    // The GPU may still be reading the old atlases; wait before rebuilding.
+    vkDeviceWaitIdle(device_);
+
+    // entries is a pointer to the vector's data: an array of pointers, one
+    // per tile, each pointing at that tile's 4096-byte index image. We must
+    // dereference entries[t] (the real pointer) rather than do pointer
+    // arithmetic (entries + t): the wall tiles are contiguous 4096-byte
+    // blocks, but sprite tiles live in 4100-byte Sprite structs (4096 idx +
+    // two uint16), so a 4096-stride walk lands 4t bytes early for tile t.
+    auto make_atlas = [&](const auto* entries, uint32_t count,
+                          VkBuffer* out_buf, VkDeviceMemory* out_mem,
+                          uint32_t* out_texels) {
+        if (*out_buf) {
+            if (*out_mem)
+                vkFreeMemory(device_, *out_mem, nullptr);
+            vkDestroyBuffer(device_, *out_buf, nullptr);
+        }
+        *out_buf = VK_NULL_HANDLE;
+        *out_texels = count * 4096;
+        VkBufferCreateInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = (*out_texels ? static_cast<VkDeviceSize>(*out_texels) * 4
+                               : 4);
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        if (vkCreateBuffer(device_, &bi, nullptr, out_buf) != VK_SUCCESS)
+            vk_fail("vkCreateBuffer(atlas)", VK_ERROR_INITIALIZATION_FAILED);
+        VkMemoryRequirements mr{};
+        vkGetBufferMemoryRequirements(device_, *out_buf, &mr);
+        alloc_mem(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, *out_mem);
+        vkBindBufferMemory(device_, *out_buf, *out_mem, 0);
+        void* map = nullptr;
+        if (vkMapMemory(device_, *out_mem, 0, VK_WHOLE_SIZE, 0, &map) !=
+            VK_SUCCESS)
+            vk_fail("vkMapMemory(atlas)", VK_ERROR_MEMORY_MAP_FAILED);
+        auto* dst = static_cast<std::uint32_t*>(map);
+        for (uint32_t t = 0; t < count; ++t)
+            for (uint32_t i = 0; i < 4096; ++i)
+                dst[static_cast<std::size_t>(t) * 4096 + i] =
+                    static_cast<std::uint32_t>((*entries[t])[i]);
+        VkMappedMemoryRange r{};
+        r.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        r.memory = *out_mem;
+        r.offset = 0;
+        r.size = VK_WHOLE_SIZE;
+        vkFlushMappedMemoryRanges(device_, 1, &r);
+        vkUnmapMemory(device_, *out_mem);
+    };
+    make_atlas(walls.empty() ? nullptr : walls.data(),
+               static_cast<uint32_t>(walls.size()), &wall_atlas_,
+               &wall_atlas_mem_, &wall_atlas_texels_);
+    make_atlas(sprites.empty() ? nullptr : sprites.data(),
+               static_cast<uint32_t>(sprites.size()), &sprite_atlas_,
+               &sprite_atlas_mem_, &sprite_atlas_texels_);
+
+    VkDescriptorBufferInfo binfo[2]{};
+    binfo[0].buffer = wall_atlas_;
+    binfo[0].offset = 0;
+    binfo[0].range = static_cast<VkDeviceSize>(wall_atlas_texels_) * 4;
+    binfo[1].buffer = sprite_atlas_;
+    binfo[1].offset = 0;
+    binfo[1].range = static_cast<VkDeviceSize>(sprite_atlas_texels_) * 4;
+    VkWriteDescriptorSet wds[2]{};
+    for (int i = 0; i < 2; ++i) {
+        wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = dset_;
+        wds[i].dstBinding = 1 + i;
+        wds[i].descriptorCount = 1;
+        wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wds[i].pBufferInfo = &binfo[i];
     }
-    // Recreate the swapchain if the window was resized.
-    uint32_t w = 0, h = 0;
-    window_.size(w, h);
-    if (w != swap_w_ || h != swap_h_) {
-        destroy_swapchain();
-        create_swapchain(w, h);
-    }
-    VkResult r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
-                                       acquire_sem_, VK_NULL_HANDLE, &acquired_);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
-        destroy_swapchain();
-        create_swapchain(w, h);
-        r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
-                                  acquire_sem_, VK_NULL_HANDLE, &acquired_);
-    }
-    if (r != VK_SUCCESS)
-        return false;
-    has_work_ = false;
-    return true;
+    vkUpdateDescriptorSets(device_, 2, wds, 0, nullptr);
 }
 
-void Renderer::render_clear(float t, bool readback) {
+void Renderer::render_frame(const Frame& f,
+                            const std::array<std::uint32_t, 256>& palette,
+                            bool readback) {
+    // ---- Upload the per-frame data (host visible, permanently mapped)
+    auto* base = static_cast<uint8_t*>(frame_map_);
+    for (uint32_t i = 0; i < kColumns; ++i) {
+        ColumnUpload c{f.columns[i].t, f.columns[i].h, f.columns[i].tx,
+                       f.columns[i].tex, 0};
+        std::memcpy(base + kColumnsOff + static_cast<uint64_t>(i) * 32, &c,
+                    sizeof(c));
+    }
+    for (uint32_t i = 0; i < kMaxSprites && i < static_cast<uint32_t>(f.sprite_count);
+         ++i) {
+        const auto& s = f.sprites[i];
+        SpriteUpload up{s.x0, s.y0, s.s, s.dist, s.scale, s.sprite};
+        std::memcpy(base + kSpritesOff + static_cast<uint64_t>(i) * 40, &up,
+                    sizeof(up));
+    }
+    std::memcpy(base + kPaletteOff, palette.data(), 256 * 4);
+    std::uint32_t count = static_cast<std::uint32_t>(f.sprite_count);
+    std::memcpy(base + kCountOff, &count, 4);
+    VkMappedMemoryRange r{};
+    r.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    r.memory = frame_mem_;
+    r.offset = 0;
+    r.size = VK_WHOLE_SIZE;
+    vkFlushMappedMemoryRanges(device_, 1, &r);
+
+    // ---- Record the command buffer
     VkCommandBufferBeginInfo bci{};
     bci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     if (vkBeginCommandBuffer(cmd_, &bci) != VK_SUCCESS)
@@ -449,16 +643,41 @@ void Renderer::render_clear(float t, bool readback) {
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &bar);
 
-    // Push constants: uint w, uint h, float t (16 bytes).
-    uint32_t pc[4] = {kInternalW, kInternalH, 0, 0};
-    std::memcpy(&pc[2], &t, sizeof(float));
-    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};
-    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, clear_pipe_);
-    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, clear_layout_,
-                            0, 1, &dset_, 0, nullptr);
-    vkCmdPushConstants(cmd_, clear_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64,
-                       pc);
+    // Wall pass: one workgroup of 320 invocations (one per column).
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, walls_pipe_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0,
+                            1, &dset_, 0, nullptr);
+    vkCmdDispatch(cmd_, 1, 1, 1);
+
+    // Barrier between the two compute passes (both write the image).
+    bar = {};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    bar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bar.image = img_;
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &bar);
+
+    // Sprite pass: 8x8 workgroups over the 320x200 image.
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, sprites_pipe_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0,
+                            1, &dset_, 0, nullptr);
     vkCmdDispatch(cmd_, (kInternalW + 7) / 8, (kInternalH + 7) / 8, 1);
+
+    // TEMP DEBUG: GPU -> host mirror of the frame buffer.
+    {
+        VkBufferCopy bc{};
+        bc.srcOffset = 0;
+        bc.dstOffset = 0;
+        bc.size = kFrameBufSize;
+        vkCmdCopyBuffer(cmd_, frame_buf_, dbg_buf_, 1, &bc);
+    }
 
     bar = {};
     bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -503,6 +722,36 @@ void Renderer::render_clear(float t, bool readback) {
     has_work_ = true;
 }
 
+bool Renderer::begin_frame() {
+    // Wait for the previous frame to finish before reusing fence/semaphores.
+    if (has_work_) {
+        const VkResult wr =
+            vkWaitForFences(device_, 1, &fence_, VK_TRUE, 1000000000ull);
+        if (wr != VK_SUCCESS)
+            return false;
+        vkResetFences(device_, 1, &fence_);
+    }
+    // Recreate the swapchain if the window was resized.
+    uint32_t w = 0, h = 0;
+    window_.size(w, h);
+    if (w != swap_w_ || h != swap_h_) {
+        destroy_swapchain();
+        create_swapchain(w, h);
+    }
+    VkResult r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
+                                       acquire_sem_, VK_NULL_HANDLE, &acquired_);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+        destroy_swapchain();
+        create_swapchain(w, h);
+        r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
+                                  acquire_sem_, VK_NULL_HANDLE, &acquired_);
+    }
+    if (r != VK_SUCCESS)
+        return false;
+    has_work_ = false;
+    return true;
+}
+
 void Renderer::present() {
     if (!has_work_)
         return;
@@ -542,6 +791,20 @@ bool Renderer::readback(std::vector<uint8_t>& out) {
     out.resize(bytes);
     std::memcpy(out.data(), data, bytes);
     vkUnmapMemory(device_, staging_mem_);
+
+    // TEMP DEBUG: dump the GPU-side mirror of the frame buffer.
+    if (dbg_mem_) {
+        void* d2 = nullptr;
+        if (vkMapMemory(device_, dbg_mem_, 0, VK_WHOLE_SIZE, 0, &d2) ==
+            VK_SUCCESS) {
+            std::ofstream f("C:/Users/NumbaWon/AppData/Local/hermes/cache/"
+                            "scratch/dbg_framebuf.bin", std::ios::binary);
+            if (f)
+                f.write(static_cast<const char*>(d2),
+                        static_cast<std::streamsize>(kFrameBufSize));
+            vkUnmapMemory(device_, dbg_mem_);
+        }
+    }
     return true;
 }
 

@@ -74,6 +74,26 @@ public:
     [[nodiscard]] int weapon_cooldown() const { return weapon_ticks_; }
     [[nodiscard]] int thing_count() const;  // not-yet-removed actors
 
+    // Door / pushwall timers (reference doorTimers / wallTimers), exposed
+    // read-only for the renderer's per-cell door/pushwall shift state.
+    struct DoorTimer {
+        std::uint16_t x, y;
+        int t;
+        bool was_blocking;  // reference "opening"
+    };
+    struct WallTimer {
+        std::uint16_t x, y;
+        int t;
+        std::int16_t dx, dy;
+        int steps;
+    };
+    [[nodiscard]] const std::vector<DoorTimer>& doors() const {
+        return door_timers_;
+    }
+    [[nodiscard]] const std::vector<WallTimer>& pushwalls() const {
+        return wall_timers_;
+    }
+
     // Fixed-format deterministic tick output (golden fixture line).
     [[nodiscard]] std::string tick_line() const;
 
@@ -91,17 +111,6 @@ private:
     bool completed_ = false;
     int weapon_ticks_ = 0;  // 0 = ready to fire
 
-    struct DoorTimer {  // reference doorTimers
-        std::uint16_t x, y;
-        int t;
-        bool was_blocking;  // reference "opening"
-    };
-    struct WallTimer {     // reference wallTimers
-        std::uint16_t x, y;
-        int t;
-        std::int16_t dx, dy;
-        int steps;
-    };
     std::vector<DoorTimer> door_timers_;
     std::vector<WallTimer> wall_timers_;
     std::uint64_t tick_count_ = 0;

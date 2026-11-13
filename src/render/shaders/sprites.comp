@@ -1,0 +1,110 @@
+// w3d render/shaders/sprites.comp — sprite pass (one invocation per pixel,
+// sprites tested nearest-first with an early-out z test; the first covering
+// sprite wins, which is exactly the reference's far-to-near draw order).
+//
+// Coverage is the inverse of the reference's forward post scan
+// (drawSprite/drawScaledPixel): texel column c writes a scale x scale block
+// at (x0 + floor(c*s), y0 + floor(r*s)) for each posted row r of column c.
+// A row is "posted" when idx != 255 (the shipped VSWAP pools never contain
+// byte 255, so an unposted cell reads 255 and is skipped; a posted 255 would
+// be drawn as palette[255] in the reference — unreachable on shipped data).
+// For pixel (X, Y) the reference's last write is the largest covering column
+// c whose column holds a posted row r covering Y (rows ascending within a
+// column, columns ascending overall).
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct Col {
+    double t;
+    double h;
+    double tx;
+    uint tex;
+};
+struct Spr {
+    double x0;
+    double y0;
+    double s;
+    double dist;
+    uint scale;
+    uint sprite;
+};
+layout(set = 0, binding = 0) buffer Columns { Col columns[320]; } cb;
+
+layout(set = 0, binding = 1) buffer WallAtlas { uint texel[]; };
+layout(set = 0, binding = 2) buffer SpriteAtlas { uint texel[]; } satlas;
+layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
+layout(set = 0, binding = 4) buffer Sprites { Spr sprites[256]; } sb;
+
+layout(set = 0, binding = 5) uniform Counts { uint spriteCount; };
+layout(set = 0, binding = 6, rgba8) uniform writeonly image2D screen;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= 320u || y >= 200u)
+        return;
+
+    double z = cb.columns[x].t;  // column ray distance (reference zIndex)
+
+    for (uint i = 0; i < spriteCount; ++i) {
+        const Spr sp = sb.sprites[i];
+        if (sp.dist >= z)
+            continue;  // z test (reference drawScaledPixel)
+        double u = double(x) - sp.x0;
+        if (u < 0.0)
+            continue;
+        double v = double(y) - sp.y0;
+
+        // Largest texel column that can cover u: floor(c*s) <= u <
+        // floor(c*s) + scale. floor(c*s) grows with c, so scan down from the
+        // upper bound c < (u + 1) / s; stop once no smaller column can cover.
+        double cmax = ceil((u + 1.0) / sp.s) - 1.0;
+        int c = (cmax > 63.0) ? 63 : (cmax < 0.0 ? 0 : int(cmax));
+        uint drawn = 0u;
+        for (uint cc = 0u; cc <= 64u && c >= 0 && drawn == 0u; ++cc) {
+            double lo = floor(double(c) * sp.s);
+            if (lo <= u - double(sp.scale))
+                break;  // no smaller column covers this pixel
+            // Both bounds: for u < lo the block starts right of the pixel
+            // (float wobble at cmax), and the upper edge is exclusive.
+            if (lo <= u && u < lo + double(sp.scale)) {
+                // This column covers X: find its last posted row covering Y.
+                // Rows are drawn ascending, so the largest covering posted r
+                // wins. floor(r*s) grows with r; same scan shape as above.
+                double rmax = ceil((v + 1.0) / sp.s) - 1.0;
+                int r = (rmax > 63.0) ? 63 : (rmax < 0.0 ? 0 : int(rmax));
+                for (uint rr = 0u; rr <= 64u && drawn == 0u; ++rr) {
+                    double lor = floor(double(r) * sp.s);
+                    if (lor <= v - double(sp.scale))
+                        break;  // no smaller row covers this pixel
+                    // Both bounds: the scan starts above the pixel, and for
+                    // v < 0 row 0 must NOT cover (the block starts at y0).
+                    if (v >= lor && v < lor + double(sp.scale)) {
+                        uint p = satlas.texel[sp.sprite * 4096u + (uint(r) << 6) +
+                                              uint(c)] % 256u;
+                        if (p != 255u) {
+                            uint px = color[p];
+                            // float vec4 write — the driver quantizes uvec4
+                            // imageStore components (see walls.comp).
+                            imageStore(screen, ivec2(int(x), int(y)),
+                                       vec4((float(px % 256u) + 0.5) / 255.0,
+                                            (float((px / 256u) % 256u) + 0.5) / 255.0,
+                                            (float((px / 65536u) % 256u) + 0.5) / 255.0,
+                                            1.0));
+                            drawn = 1u;
+                        }
+                    }
+                    if (r <= 0)
+                        break;
+                    --r;
+                }
+            }
+            if (c <= 0)
+                break;
+            --c;
+        }
+        if (drawn != 0u)
+            break;  // nearest covering sprite wins (reference order)
+    }
+}
