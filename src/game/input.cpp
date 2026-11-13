@@ -1,36 +1,44 @@
 // w3d game/input.cpp — reference keymap implementation (M5).
 #include "game/input.hpp"
 
-#include <cstring>
+#include <string>
 
 namespace w3d::game {
 
+namespace {
+// SDL key names are matched case-insensitively: SDL3 3.4.x reports
+// "Up"/"W"/"Left Ctrl" (capitalized), SDL2/X11 report "up"/"ArrowUp".
+std::string lower(const char* s) {
+    std::string r(s);
+    for (char& c : r)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    return r;
+}
+}  // namespace
+
 std::uint8_t movement_key_mask(const char* key) {
-    if (std::strcmp(key, "ArrowUp") == 0 || std::strcmp(key, "up") == 0 ||
-        std::strcmp(key, "w") == 0 || std::strcmp(key, "z") == 0)
+    const std::string k = lower(key);
+    if (k == "arrowup" || k == "up" || k == "w" || k == "z")
         return kFwd;
-    if (std::strcmp(key, "ArrowDown") == 0 || std::strcmp(key, "down") == 0 ||
-        std::strcmp(key, "s") == 0)
+    if (k == "arrowdown" || k == "down" || k == "s")
         return kBwd;
-    if (std::strcmp(key, "ArrowLeft") == 0 || std::strcmp(key, "left") == 0 ||
-        std::strcmp(key, "a") == 0)
+    if (k == "arrowleft" || k == "left" || k == "a")
         return kLeft;
-    if (std::strcmp(key, "ArrowRight") == 0 || std::strcmp(key, "right") == 0 ||
-        std::strcmp(key, "e") == 0)
+    if (k == "arrowright" || k == "right" || k == "e")
         return kRight;
-    if (std::strcmp(key, "q") == 0)
+    if (k == "q")
         return kStrafeL;
-    if (std::strcmp(key, "d") == 0)
+    if (k == "d")
         return kStrafeR;
     return 0;
 }
 
 int one_shot_event(const char* key) {
-    if (std::strcmp(key, "f") == 0 || std::strcmp(key, "Control") == 0 ||
-        std::strcmp(key, "left ctrl") == 0 ||
-        std::strcmp(key, "right ctrl") == 0)
+    const std::string k = lower(key);
+    if (k == "f" || k == "control" || k == "left ctrl" || k == "right ctrl")
         return 1;
-    if (std::strcmp(key, "space") == 0 || std::strcmp(key, " ") == 0)
+    if (k == "space" || k == " ")
         return 2;
     return 0;
 }
@@ -54,6 +62,8 @@ void LiveInput::on_key(const char* key, bool down) {
 }
 
 void LiveInput::on_mouse(double xrel) { dx_ += xrel; }
+
+void LiveInput::shoot() { shoot_ = true; }
 
 SimInput LiveInput::take() {
     SimInput in;

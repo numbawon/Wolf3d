@@ -599,6 +599,22 @@ static void test_input_keymap() {
     CHECK_EQ(one_shot_event("right ctrl"), 1);
     CHECK_EQ(one_shot_event("space"), 2);
     CHECK_EQ(one_shot_event("up"), 0);
+    // Exact names as reported by SDL3 3.4.20 (capitalized).
+    CHECK_EQ(movement_key_mask("Up"), kFwd);
+    CHECK_EQ(movement_key_mask("Down"), kBwd);
+    CHECK_EQ(movement_key_mask("Left"), kLeft);
+    CHECK_EQ(movement_key_mask("Right"), kRight);
+    CHECK_EQ(movement_key_mask("W"), kFwd);
+    CHECK_EQ(movement_key_mask("A"), kLeft);
+    CHECK_EQ(movement_key_mask("S"), kBwd);
+    CHECK_EQ(movement_key_mask("D"), kStrafeR);
+    CHECK_EQ(movement_key_mask("Q"), kStrafeL);
+    CHECK_EQ(movement_key_mask("Z"), kFwd);
+    CHECK_EQ(movement_key_mask("E"), kRight);
+    CHECK_EQ(one_shot_event("F"), 1);
+    CHECK_EQ(one_shot_event("Left Ctrl"), 1);
+    CHECK_EQ(one_shot_event("Right Ctrl"), 1);
+    CHECK_EQ(one_shot_event("Space"), 2);
 }
 
 static void test_input_live() {
@@ -630,6 +646,10 @@ static void test_input_live() {
     in.on_key("space", true);
     CHECK(in.take().activate);
     CHECK(!in.take().activate);
+    // Mouse button 1 (captured) fires, like the original.
+    in.shoot();
+    CHECK(in.take().shoot);
+    CHECK(!in.take().shoot);
     // Mouse: accumulated relative x, half-pixel threshold, sign decides.
     in.on_mouse(3.0);
     s = in.take();

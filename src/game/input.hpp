@@ -4,7 +4,10 @@
 // move/turn: ArrowUp or w/z (forward), ArrowDown or s (backward),
 // ArrowLeft or a, ArrowRight or e; strafe: q (left), d (right).
 // One-shot (key-down events only): f or Control = shoot, space = activate.
-// Relative mouse: accumulated x motion turns the player (sign per tick).
+// Relative mouse: accumulated x motion turns the player (sign per tick);
+// while captured, mouse button 1 fires (original behavior).
+// Key names are matched case-insensitively: SDL3 3.4.x reports them
+// capitalized ("Up", "W", "Left Ctrl"); SDL2/X11 report "up"/"ArrowUp".
 #pragma once
 
 #include <cstdint>
@@ -30,6 +33,8 @@ class LiveInput {
   public:
     void on_key(const char* key, bool down);
     void on_mouse(double xrel);
+    // Mouse button 1 pressed while the mouse is captured (original: fire).
+    void shoot();
     [[nodiscard]] SimInput take();
 
   private:

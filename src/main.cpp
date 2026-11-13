@@ -12,8 +12,9 @@
 //     - "START shoot" / "START activate": one-shot event on tick START.
 //
 // Without a script the window accepts live keyboard + mouse input: left-
-// click captures the mouse for turning, Esc or closing the window quits;
-// a per-second fps line goes to stdout.
+// click captures the mouse for turning (while captured, left click fires,
+// as in the original), Esc or closing the window quits; a per-second fps
+// line goes to stdout.
 //
 // Data:
 //   --data-dir PATH  default: the Steam Wolfenstein 3D base directory
@@ -314,9 +315,14 @@ int main(int argc, char** argv) {
                 } else if (!scripted && ev.type == SDL_EVENT_KEY_UP) {
                     live.on_key(SDL_GetKeyName(ev.key.key), false);
                 } else if (!scripted && ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                    // First left click captures the mouse for turning.
-                    if (ev.button.button == SDL_BUTTON_LEFT)
-                        SDL_SetWindowRelativeMouseMode(window.window(), true);
+                    // Left click: first click captures the mouse for turning;
+                    // while captured, button 1 fires (original behavior).
+                    if (ev.button.button == SDL_BUTTON_LEFT) {
+                        if (SDL_GetWindowRelativeMouseMode(window.window()))
+                            live.shoot();
+                        else
+                            SDL_SetWindowRelativeMouseMode(window.window(), true);
+                    }
                 } else if (!scripted && ev.type == SDL_EVENT_MOUSE_MOTION) {
                     live.on_mouse(ev.motion.xrel);
                 }
