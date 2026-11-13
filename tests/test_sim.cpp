@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "game/actors.hpp"
+#include "game/input.hpp"
 #include "game/level.hpp"
 #include "game/sim.hpp"
 #include "w3d/maps.hpp"
@@ -571,6 +572,91 @@ static void test_collision_wall() {
     CHECK(d > 0.0 && d < 64.0);
 }
 
+// ------------------------------------------------------------- input (M5)
+
+static void test_input_keymap() {
+    g_current = "input_keymap";
+    // Held movement keys (reference keymap; SDL3 names).
+    CHECK_EQ(movement_key_mask("ArrowUp"), kFwd);
+    CHECK_EQ(movement_key_mask("up"), kFwd);
+    CHECK_EQ(movement_key_mask("w"), kFwd);
+    CHECK_EQ(movement_key_mask("z"), kFwd);
+    CHECK_EQ(movement_key_mask("ArrowDown"), kBwd);
+    CHECK_EQ(movement_key_mask("s"), kBwd);
+    CHECK_EQ(movement_key_mask("ArrowLeft"), kLeft);
+    CHECK_EQ(movement_key_mask("a"), kLeft);
+    CHECK_EQ(movement_key_mask("ArrowRight"), kRight);
+    CHECK_EQ(movement_key_mask("e"), kRight);
+    CHECK_EQ(movement_key_mask("q"), kStrafeL);
+    CHECK_EQ(movement_key_mask("d"), kStrafeR);
+    CHECK_EQ(movement_key_mask("space"), 0);
+    CHECK_EQ(movement_key_mask("Escape"), 0);
+    CHECK_EQ(movement_key_mask("m"), 0);
+    // One-shot events.
+    CHECK_EQ(one_shot_event("f"), 1);
+    CHECK_EQ(one_shot_event("Control"), 1);
+    CHECK_EQ(one_shot_event("left ctrl"), 1);
+    CHECK_EQ(one_shot_event("right ctrl"), 1);
+    CHECK_EQ(one_shot_event("space"), 2);
+    CHECK_EQ(one_shot_event("up"), 0);
+}
+
+static void test_input_live() {
+    g_current = "input_live";
+    LiveInput in;
+    // Held key down/up.
+    in.on_key("ArrowUp", true);
+    SimInput s = in.take();
+    CHECK(s.forward);
+    CHECK(!s.backward);
+    CHECK(!s.shoot);
+    CHECK(!s.activate);
+    in.on_key("ArrowUp", false);
+    CHECK(!in.take().forward);
+    // Simultaneous holds.
+    in.on_key("z", true);
+    in.on_key("ArrowLeft", true);
+    s = in.take();
+    CHECK(s.forward);
+    CHECK(s.turn_left);
+    in.on_key("z", false);
+    in.on_key("ArrowLeft", false);
+    // One-shot shoot fires exactly once.
+    in.on_key("f", true);
+    in.on_key("f", false);
+    CHECK(in.take().shoot);
+    CHECK(!in.take().shoot);
+    // Activate (space) likewise.
+    in.on_key("space", true);
+    CHECK(in.take().activate);
+    CHECK(!in.take().activate);
+    // Mouse: accumulated relative x, half-pixel threshold, sign decides.
+    in.on_mouse(3.0);
+    s = in.take();
+    CHECK(s.turn_right);
+    CHECK(!s.turn_left);
+    in.on_mouse(-2.0);
+    s = in.take();
+    CHECK(s.turn_left);
+    CHECK(!s.turn_right);
+    in.on_mouse(0.2);
+    s = in.take();
+    CHECK(!s.turn_left);
+    CHECK(!s.turn_right);
+    in.on_mouse(1.0);
+    in.on_mouse(-1.0);
+    s = in.take();
+    CHECK(!s.turn_left);
+    CHECK(!s.turn_right);
+    // Mouse and key both turn left: OR.
+    in.on_key("a", true);
+    in.on_mouse(-5.0);
+    s = in.take();
+    CHECK(s.turn_left);
+    CHECK(!s.turn_right);
+    in.on_key("a", false);
+}
+
 // ----------------------------------------------------------- acceptance
 
 // Run the walk script over one map; returns the full tick transcript and
@@ -648,6 +734,8 @@ static Register r_shoot("shoot_kills", test_shoot_kills);
 static Register r_los("shoot_los_and_ghost", test_shoot_los_and_ghost);
 static Register r_elev("elevator_exit", test_elevator_exit);
 static Register r_coll("collision_wall", test_collision_wall);
+static Register r_kmap("input_keymap", test_input_keymap);
+static Register r_livein("input_live", test_input_live);
 static Register r_walk("walk_all_maps", test_walk_all_maps);
 
 int main() {

@@ -2,8 +2,8 @@
 //
 // Runs the headless simulation (Phase 2) at 60 ticks/s and renders each
 // frame with the Vulkan raycaster (frame.cpp + the compute passes). Input
-// comes from the reference keymap (arrows = move/turn, q/d = strafe, held)
-// plus one-shot activate (space) and shoot (f/Control), or, for
+// comes from the reference keymap (arrows = move/turn, q/d = strafe, held;
+// f/Control shoot, space activate) plus relative mouse turning, or, for
 // deterministic runs, from an input script:
 //
 //   --script FILE   text lines:
@@ -11,8 +11,9 @@
 //       ArrowRight z s q d) held on ticks START..END-1;
 //     - "START shoot" / "START activate": one-shot event on tick START.
 //
-// Without a script the window accepts live keyboard input and runs until
-// closed.
+// Without a script the window accepts live keyboard + mouse input: left-
+// click captures the mouse for turning, Esc or closing the window quits;
+// a per-second fps line goes to stdout.
 //
 // Data:
 //   --data-dir PATH  default: the Steam Wolfenstein 3D base directory
@@ -34,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "game/input.hpp"
 #include "game/level.hpp"
 #include "game/sim.hpp"
 #include "render/frame.hpp"
@@ -46,6 +48,13 @@
 
 namespace {
 
+using w3d::game::kBwd;
+using w3d::game::kFwd;
+using w3d::game::kLeft;
+using w3d::game::kRight;
+using w3d::game::kStrafeL;
+using w3d::game::kStrafeR;
+using w3d::game::LiveInput;
 using w3d::game::SimInput;
 using w3d::game::Simulation;
 using w3d::render::Frame;
@@ -109,9 +118,6 @@ struct Script {
     std::vector<bool> activate{};
     std::vector<std::uint8_t> held{};  // bitmask of held movement keys
     std::size_t ticks = 0;
-
-    static constexpr std::uint8_t kFwd = 1, kBwd = 2, kLeft = 4, kRight = 8,
-                                 kStrafeL = 16, kStrafeR = 32;
 
     // Reference keymap: arrows + z/s move/turn; q/d strafe.
     static std::uint8_t key_mask(const std::string& k) {
@@ -205,56 +211,6 @@ struct Script {
     }
 };
 
-// Live keyboard input (reference keymap states).
-struct LiveInput {
-    std::uint8_t held = 0;
-    bool shoot = false;
-    bool activate = false;
-
-    void on_key(const char* key, bool down) {
-        const std::string k(key);
-        auto set = [&](std::uint8_t m) {
-            if (down)
-                held |= m;
-            else
-                held &= ~m;
-        };
-        // SDL3 key names ("up"/"down"/...), X11-style names, and WASD.
-        if (k == "ArrowUp" || k == "up" || k == "w" || k == "z")
-            set(Script::kFwd);
-        else if (k == "ArrowDown" || k == "down" || k == "s")
-            set(Script::kBwd);
-        else if (k == "ArrowLeft" || k == "left" || k == "a")
-            set(Script::kLeft);
-        else if (k == "ArrowRight" || k == "right" || k == "e")
-            set(Script::kRight);
-        else if (k == "q")
-            set(Script::kStrafeL);
-        else if (k == "d")
-            set(Script::kStrafeR);
-        else if (down && (k == "f" || k == "Control" || k == "left ctrl" ||
-                          k == "right ctrl"))
-            shoot = true;
-        else if (down && (k == "space" || k == " "))
-            activate = true;
-    }
-
-    SimInput take() {
-        SimInput in;
-        in.forward = held & Script::kFwd;
-        in.backward = held & Script::kBwd;
-        in.turn_left = held & Script::kLeft;
-        in.turn_right = held & Script::kRight;
-        in.strafe_left = held & Script::kStrafeL;
-        in.strafe_right = held & Script::kStrafeR;
-        in.shoot = shoot;
-        in.activate = activate;
-        shoot = false;
-        activate = false;
-        return in;
-    }
-};
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -341,18 +297,28 @@ int main(int argc, char** argv) {
         Frame frame{};
         LiveInput live;
         uint32_t frame_idx = 0;
+        std::uint64_t fps_last = SDL_GetTicks();
+        uint32_t fps_frames = 0;
         bool quit = false;
         while (!quit) {
-            // SDL events (window close + live keys).
+            // SDL events (window close, Esc, live keys, relative mouse).
             bool window_open = true;
             SDL_Event ev{};
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_EVENT_QUIT) {
                     window_open = false;
                 } else if (!scripted && ev.type == SDL_EVENT_KEY_DOWN) {
+                    if (ev.key.key == SDLK_ESCAPE)
+                        window_open = false;
                     live.on_key(SDL_GetKeyName(ev.key.key), true);
                 } else if (!scripted && ev.type == SDL_EVENT_KEY_UP) {
                     live.on_key(SDL_GetKeyName(ev.key.key), false);
+                } else if (!scripted && ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    // First left click captures the mouse for turning.
+                    if (ev.button.button == SDL_BUTTON_LEFT)
+                        SDL_SetWindowRelativeMouseMode(window.window(), true);
+                } else if (!scripted && ev.type == SDL_EVENT_MOUSE_MOTION) {
+                    live.on_mouse(ev.motion.xrel);
                 }
             }
             if (!window_open)
@@ -360,7 +326,8 @@ int main(int argc, char** argv) {
             if (args.frames != 0 && frame_idx >= args.frames)
                 quit = true;
 
-            // One simulation tick + one rendered frame.
+            // One simulation tick + one rendered frame. live.take() already
+            // folds in this tick's relative-mouse turn.
             const SimInput in = scripted ? script.input_for(frame_idx)
                                          : live.take();
             sim.tick(in);
@@ -396,6 +363,16 @@ int main(int argc, char** argv) {
                 quit = true;
             }
             frame_idx++;
+            {
+                const std::uint64_t now = SDL_GetTicks();
+                if (now - fps_last >= 1000) {
+                    std::printf("w3d: %d fps\n",
+                                static_cast<int>((frame_idx - fps_frames) *
+                                                 1000 / (now - fps_last)));
+                    fps_last = now;
+                    fps_frames = frame_idx;
+                }
+            }
             if (!scripted)
                 SDL_Delay(16);  // ~60 Hz
         }

@@ -7,7 +7,12 @@
 namespace w3d::util {
 
 namespace {
-struct alignas(4) BmpHeader {
+// Standard BMP layout: 'BM' @0, file size @2, reserved @6/8, data offset @10,
+// 40-byte DIB @14 (total 54). Packed so the size field sits at byte 2 with
+// no padding (a 4-aligned size after the 2-byte tag would shift the whole
+// header and leave two uninitialized bytes in the file).
+#pragma pack(push, 1)
+struct BmpHeader {
     uint16_t tag = 0x4D42; // "BM"
     uint32_t size = 0;
     uint16_t reserved0 = 0;
@@ -25,6 +30,7 @@ struct alignas(4) BmpHeader {
     uint32_t colors_used = 0;
     uint32_t colors_important = 0;
 };
+#pragma pack(pop)
 } // namespace
 
 bool write_bmp(const std::filesystem::path& path, uint32_t w, uint32_t h,

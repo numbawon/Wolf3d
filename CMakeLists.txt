@@ -48,6 +48,7 @@ endif()
 # Phase 2: headless game simulation on the data layer.
 add_library(w3d_game STATIC
     src/game/actors.cpp
+    src/game/input.cpp
     src/game/level.cpp
     src/game/sim.cpp)
 target_link_libraries(w3d_game PUBLIC w3d_data)
