@@ -8,12 +8,35 @@
 // the 64-texel wall strip with the reference's yf/stepf accumulation, so
 // the texel-to-row mapping is identical to the JS.
 //
-// Driver workarounds (RTX Spark N1X, ARM64 Vulkan driver, 2026-11-12):
-// - `v & 0xFF` is miscompiled into a nonzero-test (yields 0 or 255); every
-//   byte extraction / low-byte index uses % 256u and / 256u instead.
-// - uvec4 imageStore on R8G8B8A8 storage images is quantized per component
-//   to {0, 255}; the float vec4 path with (v + 0.5) / 255.0 is correct
-//   (both proven by differential renders, see docs/phase-3-status.md).
+// M4 fog: per-pixel distance fog (PLAN: replaces the original 24-palette
+// fog table, "visually equivalent"). Level L = min(23, floor(dist / step));
+// blend factor a = L/23 toward a brown ramp (FOG_NEAR at low levels,
+// FOG_FAR at full fog). Walls use the column's ray distance (constant per
+// column); floor/ceiling rows use the per-pixel plane distance
+// d = (t/h) * |row - 100| (similar triangles: the wall at distance t spans
+// h px around the horizon row 100). dist is in cells (the reference's
+// zIndex units). The weapon is fogged in the sprite pass via its own
+// distance (0 -> level 0 -> unmodified).
+//
+// The per-column fog inputs (wall-union rows wlo/whi, plane slope t/h) and
+// the fog switch are computed on the CPU (renderer.cpp) and uploaded in
+// the trailing region of the columns SSBO. Rationale: it keeps the shader
+// free of any new expression forms (only SSBO reads, one multiply, one
+// comparison-ternary — all shapes the DDA already exercises), and it makes
+// the fog fully cross-checkable against the CPU model pixel by pixel.
+//
+// Driver facts proven this phase (value probes on the RTX Spark N1X
+// ARM64 driver; see docs/phase-3-status.md M4):
+// - UBO descriptor offsets must be 256-byte aligned: unaligned offsets are
+//   silently clamped DOWN (33796 read the 33792 slot; 33808 read zeros).
+// - `bool` UBO members are misplaced (probe read fog_on at offset 0).
+// The fog switch is therefore a double pair (1.0/0.0, tested `< 0.5`) and
+// the fog never uses a UBO at all.
+//
+// Verification note: the frame buffer's column region is 320 x 32B STRIDED
+// records (t@0, h@8, tx@16, tex@24) — parsing it as two flat double arrays
+// (or the 40B sprite records as 4-double records) yields a phantom
+// "column permutation" and phantom level errors (bit me once, 2026-11-13).
 #version 460
 
 layout(local_size_x = 320) in;
@@ -24,11 +47,38 @@ struct Col {
     double tx;
     uint tex;
 };
-layout(set = 0, binding = 0) buffer Columns { Col columns[320]; } cb;
+// Trailing fog region (all computed on the CPU, std430 offsets):
+// fog_invstep @10240, fog_on @10248, slope[320] @10256 (t/h per column),
+// wlo_arr[320] @12816 / whi_arr[320] @14096 (wall-union row bounds).
+// The region ends at 15376 < 16384 (the sprites sub-region).
+layout(set = 0, binding = 0) buffer Columns {
+    Col columns[320];
+    double fog_invstep;
+    double fog_on;
+    double slope[320];
+    int wlo_arr[320];
+    int whi_arr[320];
+} cb;
 
 layout(set = 0, binding = 1) buffer WallAtlas { uint texel[]; };
 layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
 layout(set = 0, binding = 6, rgba8) uniform writeonly image2D screen;
+
+// Fog brown ramp (0-255 float space).
+const vec3 FOG_NEAR = vec3(140.0, 92.0, 40.0);
+const vec3 FOG_FAR = vec3(24.0, 14.0, 6.0);
+
+// dist in cells -> fogged 255-space vec3 (in = 255-space).
+vec3 fog_mixed(vec3 c, double dist) {
+    if (cb.fog_on < 0.5 || cb.fog_invstep <= 0.0)
+        return c;
+    uint L = min(23u, uint(dist * cb.fog_invstep));
+    if (L == 0u)
+        return c;
+    float u = float(L) / 23.0;
+    vec3 fc = mix(FOG_NEAR, FOG_FAR, u);
+    return c * (1.0 - u) + fc * u;
+}
 
 void main() {
     uint x = gl_LocalInvocationID.x;
@@ -74,12 +124,28 @@ void main() {
         yi += n;
     }
 
+    // M4 fog (inputs uploaded by the CPU — see the header notes). Rows
+    // inside the wall union use the column distance t; all other rows are
+    // floor/ceiling and use the per-pixel plane distance
+    // d = slope * |row - 100| (slope = t/h; occluded columns h == 0 have
+    // slope 0 and are left un-fogged).
+    const double sl = cb.slope[x];
+    const int wl = cb.wlo_arr[x];
+    const int wh = cb.whi_arr[x];
+
     for (uint row = 0u; row < 200u; ++row) {
         uint pxv = rows[row];
+        const double d =
+            (int(row) >= wl && int(row) < wh)
+                ? c.t
+                : sl * abs(double(row) - 100.0);
+        vec3 col = vec3(float(pxv % 256u), float((pxv / 256u) % 256u),
+                        float((pxv / 65536u) % 256u));
+        vec3 outc = fog_mixed(col, d);
         imageStore(screen, ivec2(int(x), int(row)),
-                   vec4((float(pxv % 256u) + 0.5) / 255.0,
-                        (float((pxv / 256u) % 256u) + 0.5) / 255.0,
-                        (float((pxv / 65536u) % 256u) + 0.5) / 255.0,
+                   vec4((outc.r + 0.5) / 255.0,
+                        (outc.g + 0.5) / 255.0,
+                        (outc.b + 0.5) / 255.0,
                         1.0));
     }
 }

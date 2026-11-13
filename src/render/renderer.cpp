@@ -4,6 +4,7 @@
 #include <vulkan/vulkan_win32.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -125,7 +126,25 @@ constexpr uint64_t kColumnsOff = 0;
 constexpr uint64_t kSpritesOff = 16384;
 constexpr uint64_t kPaletteOff = 32768;
 constexpr uint64_t kCountOff = 33792;
-constexpr uint64_t kFrameBufSize = 33796;
+// UBO offsets must be a multiple of minUniformBufferOffsetAlignment. This
+// ARM64 driver requires 256 and silently clamps unaligned offsets DOWN:
+// 33796 -> 33792 (fog read the count slot), proven by in-shader probes.
+// Fog params: this driver clamps unaligned UBO descriptor offsets down
+// (256-byte alignment required) and misplaces `bool` UBO members (both
+// proven by value probes this phase), so the fog never uses a UBO. The
+// whole fog input set is computed here on the CPU and rides in the
+// trailing region of the columns SSBO (walls pass) / sprites SSBO
+// (sprite pass) — plain storage reads, cross-checkable against the CPU
+// model:
+//   @10240 fog_invstep (double), @10248 fog_on (double),
+//   @10256 slope[320] (t/h, double), @12816 wlo_arr[320] (int),
+//   @14096 whi_arr[320] (int) — ends at 15376 < 16384.
+constexpr uint64_t kWallsFogOff = kColumnsOff + 320u * 32;      // 10240
+constexpr uint64_t kSlopeOff = kWallsFogOff + 16;               // 10256
+constexpr uint64_t kWloOff = kSlopeOff + 320u * 8;              // 12816
+constexpr uint64_t kWhiOff = kWloOff + 320u * 4;                // 14096
+constexpr uint64_t kSpritesFogOff = kSpritesOff + 256u * 40;    // 26624
+constexpr uint64_t kFrameBufSize = 34064;
 
 // CPU-side record layouts (must match the GLSL struct layouts exactly).
 struct ColumnUpload {
@@ -138,10 +157,21 @@ struct SpriteUpload {
     std::uint32_t scale;
     std::uint32_t sprite;
 };
+// GLSL trailing fog doubles (`double fog_invstep; double fog_on;` appended
+// to the columns / sprites SSBO blocks). Plain doubles — UBOs are off the
+// table for fog on this driver (see the offset/bool notes above); the
+// on-flag is 1.0/0.0 tested with `< 0.5`. invstep is 1/kFogStep so the
+// shader only multiplies.
+struct FogUpload {
+    double invstep;
+    double on;
+};
 static_assert(sizeof(ColumnUpload) == 32);
 static_assert(offsetof(ColumnUpload, tex) == 24);
 static_assert(sizeof(SpriteUpload) == 40);
 static_assert(offsetof(SpriteUpload, scale) == 32);
+static_assert(sizeof(FogUpload) == 16);
+static_assert(offsetof(FogUpload, on) == 8);
 
 } // namespace
 
@@ -324,7 +354,7 @@ Renderer::Renderer(Window& window, VkInstance instance)
 
     // ---- Descriptor set (buffer entries filled by load_atlases)
     VkDescriptorPoolSize dps[7]{};
-    for (uint32_t i = 0; i < 6; ++i)
+    for (uint32_t i = 0; i < 7; ++i)
         dps[i] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
     dps[5] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
     dps[6] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
@@ -349,7 +379,7 @@ Renderer::Renderer(Window& window, VkInstance instance)
         VkDescriptorImageInfo dii{};
         dii.imageView = img_view_;
         dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        VkDescriptorBufferInfo binfo[6]{};
+        VkDescriptorBufferInfo binfo[7]{};
         binfo[0].buffer = frame_buf_;  // columns
         binfo[0].offset = kColumnsOff;
         binfo[0].range = kSpritesOff - kColumnsOff;
@@ -360,26 +390,23 @@ Renderer::Renderer(Window& window, VkInstance instance)
         binfo[3].range = 1024;
         binfo[4].buffer = frame_buf_;      // sprite records
         binfo[4].offset = kSpritesOff;
-        binfo[4].range = 256u * 40;
+        binfo[4].range = 256u * 40 + 16;   // + trailing fog doubles
         binfo[5].buffer = frame_buf_;      // count
         binfo[5].offset = kCountOff;
         binfo[5].range = 4;
         VkWriteDescriptorSet wds[7]{};
-        for (uint32_t i = 0; i < 6; ++i) {
+        for (uint32_t i = 0; i < 7; ++i) {
             wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             wds[i].dstSet = dset_;
             wds[i].dstBinding = i;
             wds[i].descriptorCount = 1;
             wds[i].descriptorType = (i == 5)
                 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                : (i == 6) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                           : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             wds[i].pBufferInfo = &binfo[i];
         }
-        wds[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wds[6].dstSet = dset_;
-        wds[6].dstBinding = 6;
-        wds[6].descriptorCount = 1;
-        wds[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        wds[6].pBufferInfo = nullptr;  // image binding below
         wds[6].pImageInfo = &dii;
         vkUpdateDescriptorSets(device_, 7, wds, 0, nullptr);
     }
@@ -597,7 +624,7 @@ void Renderer::load_atlases(
 
 void Renderer::render_frame(const Frame& f,
                             const std::array<std::uint32_t, 256>& palette,
-                            bool readback) {
+                            bool readback, bool fog_on) {
     // ---- Upload the per-frame data (host visible, permanently mapped)
     auto* base = static_cast<uint8_t*>(frame_map_);
     for (uint32_t i = 0; i < kColumns; ++i) {
@@ -605,6 +632,20 @@ void Renderer::render_frame(const Frame& f,
                        f.columns[i].tex, 0};
         std::memcpy(base + kColumnsOff + static_cast<uint64_t>(i) * 32, &c,
                     sizeof(c));
+        // M4 fog inputs (CPU side — see the offset notes): the wall union
+        // bounds and the plane slope for this column. Same formulas the
+        // shader's DDA uses (top = 100 - h, fbot = floor(top + 2h)).
+        const double top = 100.0 - f.columns[i].h;
+        const double fbot = std::floor(top + 2.0 * f.columns[i].h);
+        const double tf = std::floor(top);
+        const int wlo = (tf < 0.0) ? 0 : (tf > 200.0 ? 200 : static_cast<int>(tf));
+        const int whi = (fbot > 200.0) ? 200 : (fbot < 0.0 ? 0 : static_cast<int>(fbot));
+        const double slope =
+            (f.columns[i].h > 0.0) ? f.columns[i].t / f.columns[i].h : 0.0;
+        const uint64_t ii = static_cast<uint64_t>(i);
+        std::memcpy(base + kSlopeOff + ii * 8, &slope, 8);
+        std::memcpy(base + kWloOff + ii * 4, &wlo, 4);
+        std::memcpy(base + kWhiOff + ii * 4, &whi, 4);
     }
     for (uint32_t i = 0; i < kMaxSprites && i < static_cast<uint32_t>(f.sprite_count);
          ++i) {
@@ -616,6 +657,12 @@ void Renderer::render_frame(const Frame& f,
     std::memcpy(base + kPaletteOff, palette.data(), 256 * 4);
     std::uint32_t count = static_cast<std::uint32_t>(f.sprite_count);
     std::memcpy(base + kCountOff, &count, 4);
+    // Fog params (invstep + on-flag) as two doubles, written to both the
+    // columns-SSBO tail (walls pass) and the sprites-SSBO tail (sprite
+    // pass) — the UBO slot is gone (see kWallsFogOff note).
+    FogUpload fog{1.0 / kFogStep, fog_on ? 1.0 : 0.0};
+    std::memcpy(base + kWallsFogOff, &fog, sizeof(fog));
+    std::memcpy(base + kSpritesFogOff, &fog, sizeof(fog));
     VkMappedMemoryRange r{};
     r.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
     r.memory = frame_mem_;

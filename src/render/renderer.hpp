@@ -44,7 +44,7 @@ public:
     // optional copy to host staging) into the command buffer.
     void render_frame(const Frame& f,
                       const std::array<std::uint32_t, 256>& palette,
-                      bool readback);
+                      bool readback, bool fog_on);
     // Acquires the next swapchain image (recreating the swapchain on
     // resize). Returns false if the window should close.
     bool begin_frame();
@@ -123,8 +123,9 @@ private:
     uint32_t sprite_atlas_texels_ = 0;
 
     // Per-frame dynamic buffer (host visible, permanently mapped) with
-    // sub-regions: columns @0 (320x32B), sprites @16384 (256x40B),
-    // palette @32768 (256x4B), count @33792 (4B).
+    // sub-regions: columns @0 (320x32B), fog @10240 (two doubles, walls
+    // pass), sprites @16384 (256x40B), fog @26624 (two doubles, sprite
+    // pass), palette @32768 (256x4B), count @33792 (4B).
     VkBuffer frame_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory frame_mem_ = VK_NULL_HANDLE;
     void* frame_map_ = nullptr;

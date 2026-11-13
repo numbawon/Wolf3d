@@ -63,6 +63,7 @@ struct Args {
     std::string script;
     uint32_t frames = 0;  // 0 = run until closed
     bool one_frame = false;
+    bool no_fog = false;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -82,6 +83,8 @@ Args parse_args(int argc, char** argv) {
             a.script = argv[++i];
         } else if (std::strcmp(argv[i], "--one-frame") == 0) {
             a.one_frame = true;
+        } else if (std::strcmp(argv[i], "--no-fog") == 0) {
+            a.no_fog = true;
         } else {
             std::fprintf(stderr,
                          "usage: w3d_app [--level N] [--sod] "
@@ -373,7 +376,7 @@ int main(int argc, char** argv) {
                                  args.frames != 0 &&
                                  frame_idx == args.frames - 1;
             if (renderer.begin_frame()) {
-                renderer.render_frame(frame, palette, do_shot);
+                renderer.render_frame(frame, palette, do_shot, !args.no_fog);
                 renderer.present();
                 if (do_shot) {
                     std::vector<uint8_t> px;

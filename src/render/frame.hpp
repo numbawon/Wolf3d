@@ -29,6 +29,12 @@ inline constexpr int kMaxSprites = 256;
 inline constexpr double kFov = 1.0;
 inline constexpr double kWallHeight = kColumns / (2.0 * kFov);
 
+// M4 fog: distance (in cells, the reference's zIndex units) per fog level.
+// 24 levels -> full fog at 24 * kFogStep cells. Visually equivalent to the
+// original's 24-palette fog table (PLAN); the brown ramp constants live in
+// the shaders (walls.comp / sprites.comp, kept identical).
+inline constexpr double kFogStep = 1.25;
+
 // Per-column DDA result (reference drawWalls locals).
 struct ColumnRecord {
     double t = 1.0;    // ray distance in cells (reference zIndex[i])
