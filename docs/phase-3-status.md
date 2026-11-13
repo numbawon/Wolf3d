@@ -1,4 +1,4 @@
-# Phase 3 (Vulkan render) — status (2026-11-13, M4 DONE)
+# Phase 3 (Vulkan render) — status (2026-11-13, M5.1 DONE)
 
 Branch: `phase-3-render`. Repo: C:\Users\NumbaWon\git\Wolf3d.
 Build: from git-bash `cmd /c ".build\build_arm64.bat"` → expect `BUILD_OK`.
@@ -17,6 +17,9 @@ BMP format: 56-byte header, bottom-up RGB, stride 960, 320x200.)
   equivalent" to the original's 24-palette fog table (no original fog data
   is recoverable: not in VSWAP.wl6, not in the JS reference). Verified
   against a full-frame CPU model — see below.
+- M5 live input + render loop: DONE (2026-11-13, commits 83022d7 + 0765cfe).
+- M5.1 floor/ceiling fog geometry fix: DONE (2026-11-13) — user-visible
+  "bright at the walls, dark banded floor" bug; see below.
 
 ## M4 fog (design + root causes)
 Design (PLAN: "visually equivalent" to the original's 24-palette fog table):
@@ -24,9 +27,20 @@ Design (PLAN: "visually equivalent" to the original's 24-palette fog table):
   brown ramp (140,92,40) → (24,14,6). kFogStep = 1.25 cells/level → full
   fog at 30 cells.
 - Walls/floor/ceiling (walls.comp): wall-union rows use the column's ray
-  distance t; other rows use the plane distance d = (t/h) * |row - 100|
-  (similar triangles — the wall at distance t spans h px around horizon
-  row 100). Occluded columns (h == 0) are left un-fogged.
+  distance t; other rows use the TRUE plane distance d = (kWallHeight/2) /
+  |row - 100| — M5.1 FIX. (Eye at mid-wall height: the floor 0.5 cells
+  below the eye projects to row 100 + 80/D; column independent; nearest
+  floor D = 0.81 at the screen edge; horizon row full fog.) The original
+  M4 formula (t/h) * |row - 100| was inverted geometry: the NEAREST floor
+  rows got the strongest fog, the floor at the wall base the least, and
+  it varied per column -> user-visible "bright at the walls, dark banded
+  floor" (live-play screenshots 2026-11-13). The per-row table (row 100
+  = 99.0 sentinel -> full fog) is CPU-computed and rides in the old
+  slope[320] slot (@10256, first 200 rows used) — all other SSBO offsets
+  unchanged, shader does a plain SSBO read (no new expression forms for
+  the driver). Note: occluded columns (h == 0, no wall rows) now get the
+  table fog on all rows (before: un-fogged); the table is column-free so
+  this matches the original's column-independent floor fade.
 - Sprites (sprites.comp): fogged at the sprite's own forward distance;
   the weapon's distance is 0 → level 0 → unmodified, matching the
   original's un-fogged weapon.
@@ -114,8 +128,10 @@ column's data. Parse with the record stride (or struct unpack).
 - src/render/shaders/sprites.comp — fog at the sprite's own forward
   distance via the sprites SSBO tail (invstep, on doubles).
 - src/render/renderer.cpp — render_frame computes the fog inputs on the
-  CPU (wlo/whi/slope per column) and uploads them in the frame-buffer
-  tail; FogUpload{double invstep; double on}; frame buffer now 34064 B.
+  CPU (wlo/whi per column; static per-row plane-distance table, 200
+  doubles in the old slope[320] slot @10256) and uploads them in the
+  frame-buffer tail; FogUpload{double invstep; double on}; frame buffer
+  34064 B.
 - src/render/renderer.hpp — render_frame takes fog_on; buffer layout
   comment.
 - src/render/frame.hpp — kFogStep (1.25 cells/level).
@@ -126,10 +142,40 @@ column's data. Parse with the record stride (or struct unpack).
 - clear.comp deleted (M2 shader, replaced).
 
 ## Tests
-173 (w3d_tests) + 327 (w3d_sim_tests) = 500 checks, 0 failures (post-M4).
+173 (w3d_tests) + 386 (w3d_sim_tests) = 559 checks, 0 failures (post-M5.1).
 
 ## Next
-M5 per PLAN.md (mouse/keyboard input + live 60 fps), then phase end:
+P3 acceptance (visual pass incl. plane1 90-99 check), then phase end:
 commit phase-3-render, merge --no-ff into main ("Merge phase-3-...: ..."),
 push origin main + phase branch, update docs/PLAN.md DONE note with the
 commit hash.
+
+## M5 (2026-11-13, DONE)
+Live input + render loop (commits 83022d7 + 0765cfe): SDL3 keyboard
+(case-insensitive keymap — SDL3 3.4.20 capitalizes key names) + relative
+mouse turning (sign-per-tick) + mouse capture (first left click; while
+captured, left click fires; Esc quits) + per-second fps line (~52 fps
+N1X). `--script FILE` deterministic mode: lines "START END KEY" (held on
+START..END-1) / "START shoot" / "START activate"; TOTAL ticks = --frames;
+after the last range the player idles (enemies still tick) and the
+screenshot is the LAST frame — so a probe that reproduces a scripted
+capture must use the EXACT same move list and dump at the last input
+tick. write_bmp header `#pragma pack(1)` fix (54-byte standard header).
+
+## M5.1 floor/ceiling fog fix (2026-11-13, DONE)
+Bug (user live-play screenshots): floor "dark in the center, bright at
+the walls, dark bands beyond" — M4's per-column (t/h) * |row-100| is
+inverted plane geometry (strongest fog on the NEAREST floor rows, least
+at the wall base, per-column banding). Fix: per-row table
+D(row) = (kWallHeight/2) / |row-100| (row 100 -> 99.0 sentinel = full
+fog), CPU-computed, uploaded in the old slope[320] slot; shader = plain
+SSBO read (no new expression forms for the driver quirks). Verified:
+hall back-view frame 25575 floor+ceiling px and center-view frame 36997
+px vs the CPU model = 0 mismatches, sprites excluded by EXACT
+painted-pixel simulation (posted-texel expansion with per-column z test;
+verify_fog5.py in scratch). Walls/sprites byte-identical old->new
+(full-frame diff: only floor/ceiling fog rows changed). 173+386 green.
+Investigated, NOT a bug: sprite 16 (prop, plane1 37) posts only rows
+0-9 + 59-63 (transparent middle) — at close range its posted texels
+project off-screen (top above, bottom below) -> 0 painted px, exactly
+per the reference semantics (CPU sim == GPU == 0).

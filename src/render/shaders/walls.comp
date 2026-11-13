@@ -8,18 +8,22 @@
 // the 64-texel wall strip with the reference's yf/stepf accumulation, so
 // the texel-to-row mapping is identical to the JS.
 //
-// M4 fog: per-pixel distance fog (PLAN: replaces the original 24-palette
-// fog table, "visually equivalent"). Level L = min(23, floor(dist / step));
-// blend factor a = L/23 toward a brown ramp (FOG_NEAR at low levels,
-// FOG_FAR at full fog). Walls use the column's ray distance (constant per
-// column); floor/ceiling rows use the per-pixel plane distance
-// d = (t/h) * |row - 100| (similar triangles: the wall at distance t spans
-// h px around the horizon row 100). dist is in cells (the reference's
-// zIndex units). The weapon is fogged in the sprite pass via its own
-// distance (0 -> level 0 -> unmodified).
+// M4 fog (M5.1 fixed): per-pixel distance fog (PLAN: replaces the original
+// 24-palette fog table, "visually equivalent"). Level L = min(23,
+// floor(dist / step)); blend factor a = L/23 toward a brown ramp (FOG_NEAR
+// at low levels, FOG_FAR at full fog). Walls use the column's ray distance
+// (constant per column); floor/ceiling rows use the true plane distance
+// d = (kWallHeight/2) / |row - 100| (eye at mid-wall height: the floor 0.5
+// cells below the eye projects to row 100 + 80/D — column independent,
+// nearest floor D = 0.81 at the screen edge, full fog at the horizon row).
+// M4's per-column slope t/h * |row-100| was the wrong geometry (it fogged
+// the nearest floor rows the hardest); the per-row table is now computed
+// on the CPU and uploaded in the trailing columns-SSBO region. dist is in
+// cells (the reference's zIndex units). The weapon is fogged in the sprite
+// pass via its own distance (0 -> level 0 -> unmodified).
 //
-// The per-column fog inputs (wall-union rows wlo/whi, plane slope t/h) and
-// the fog switch are computed on the CPU (renderer.cpp) and uploaded in
+// The per-column fog inputs (wall-union rows wlo/whi) and the fog switch
+// are computed on the CPU (renderer.cpp) and uploaded in
 // the trailing region of the columns SSBO. Rationale: it keeps the shader
 // free of any new expression forms (only SSBO reads, one multiply, one
 // comparison-ternary — all shapes the DDA already exercises), and it makes
@@ -48,14 +52,15 @@ struct Col {
     uint tex;
 };
 // Trailing fog region (all computed on the CPU, std430 offsets):
-// fog_invstep @10240, fog_on @10248, slope[320] @10256 (t/h per column),
-// wlo_arr[320] @12816 / whi_arr[320] @14096 (wall-union row bounds).
-// The region ends at 15376 < 16384 (the sprites sub-region).
+// fog_invstep @10240, fog_on @10248, rowdist[320] @10256 (first 200 =
+// floor/ceiling plane distance per screen row), wlo_arr[320] @12816 /
+// whi_arr[320] @14096 (wall-union row bounds). The region ends at 15376 <
+// 16384 (the sprites sub-region).
 layout(set = 0, binding = 0) buffer Columns {
     Col columns[320];
     double fog_invstep;
     double fog_on;
-    double slope[320];
+    double rowdist[320];
     int wlo_arr[320];
     int whi_arr[320];
 } cb;
@@ -126,10 +131,8 @@ void main() {
 
     // M4 fog (inputs uploaded by the CPU — see the header notes). Rows
     // inside the wall union use the column distance t; all other rows are
-    // floor/ceiling and use the per-pixel plane distance
-    // d = slope * |row - 100| (slope = t/h; occluded columns h == 0 have
-    // slope 0 and are left un-fogged).
-    const double sl = cb.slope[x];
+    // floor/ceiling and use the per-row plane distance table (80/|row-100|,
+    // computed on the CPU; the horizon row saturates to full fog).
     const int wl = cb.wlo_arr[x];
     const int wh = cb.whi_arr[x];
 
@@ -138,7 +141,7 @@ void main() {
         const double d =
             (int(row) >= wl && int(row) < wh)
                 ? c.t
-                : sl * abs(double(row) - 100.0);
+                : cb.rowdist[row];
         vec3 col = vec3(float(pxv % 256u), float((pxv / 256u) % 256u),
                         float((pxv / 65536u) % 256u));
         vec3 outc = fog_mixed(col, d);

@@ -137,11 +137,15 @@ constexpr uint64_t kCountOff = 33792;
 // (sprite pass) — plain storage reads, cross-checkable against the CPU
 // model:
 //   @10240 fog_invstep (double), @10248 fog_on (double),
-//   @10256 slope[320] (t/h, double), @12816 wlo_arr[320] (int),
-//   @14096 whi_arr[320] (int) — ends at 15376 < 16384.
+//   @10256 rowdist[320] (double; first 200 = floor/ceiling plane distance
+//           per screen row, 80/|row-100| — M5.1 fix replacing the per-column
+//           slope t/h, which fogged the nearest floor the hardest),
+//   @12816 wlo_arr[320] (int), @14096 whi_arr[320] (int) — ends at
+//   15376 < 16384. (rowdist keeps the old 320x8B slot so every downstream
+//   offset is unchanged.)
 constexpr uint64_t kWallsFogOff = kColumnsOff + 320u * 32;      // 10240
-constexpr uint64_t kSlopeOff = kWallsFogOff + 16;               // 10256
-constexpr uint64_t kWloOff = kSlopeOff + 320u * 8;              // 12816
+constexpr uint64_t kRowDistOff = kWallsFogOff + 16;             // 10256
+constexpr uint64_t kWloOff = kRowDistOff + 320u * 8;            // 12816
 constexpr uint64_t kWhiOff = kWloOff + 320u * 4;                // 14096
 constexpr uint64_t kSpritesFogOff = kSpritesOff + 256u * 40;    // 26624
 constexpr uint64_t kFrameBufSize = 34064;
@@ -633,19 +637,36 @@ void Renderer::render_frame(const Frame& f,
         std::memcpy(base + kColumnsOff + static_cast<uint64_t>(i) * 32, &c,
                     sizeof(c));
         // M4 fog inputs (CPU side — see the offset notes): the wall union
-        // bounds and the plane slope for this column. Same formulas the
-        // shader's DDA uses (top = 100 - h, fbot = floor(top + 2h)).
+        // bounds for this column. Same formulas the shader's DDA uses
+        // (top = 100 - h, fbot = floor(top + 2h)).
         const double top = 100.0 - f.columns[i].h;
         const double fbot = std::floor(top + 2.0 * f.columns[i].h);
         const double tf = std::floor(top);
         const int wlo = (tf < 0.0) ? 0 : (tf > 200.0 ? 200 : static_cast<int>(tf));
         const int whi = (fbot > 200.0) ? 200 : (fbot < 0.0 ? 0 : static_cast<int>(fbot));
-        const double slope =
-            (f.columns[i].h > 0.0) ? f.columns[i].t / f.columns[i].h : 0.0;
         const uint64_t ii = static_cast<uint64_t>(i);
-        std::memcpy(base + kSlopeOff + ii * 8, &slope, 8);
         std::memcpy(base + kWloOff + ii * 4, &wlo, 4);
         std::memcpy(base + kWhiOff + ii * 4, &whi, 4);
+    }
+    // M5.1: floor/ceiling fog distance per screen row (static table). A
+    // floor point at distance D projects to row 100 + (kWallHeight/2)/D
+    // (eye at mid-wall height, floor 0.5 cells below the eye), i.e.
+    // D(row) = (kWallHeight/2) / |row-100| — column independent, nearest
+    // floor (D = 0.81) at the screen edge, full fog at the horizon row.
+    // (Replaces M4's per-column slope t/h * |row-100|, which fogged the
+    // nearest floor rows the hardest — user-visible as a bright wall line
+    // with dark banded floor beyond it.)
+    {
+        static double rowdist[320];
+        for (int r = 0; r < 320; ++r) {
+            if (r >= kRows) {
+                rowdist[r] = 99.0;  // unused tail (keeps the slot padded)
+                continue;
+            }
+            const double ar = std::abs(r - 100.0);
+            rowdist[r] = (ar == 0.0) ? 99.0 : (kWallHeight / 2.0) / ar;
+        }
+        std::memcpy(base + kRowDistOff, rowdist, sizeof(rowdist));
     }
     for (uint32_t i = 0; i < kMaxSprites && i < static_cast<uint32_t>(f.sprite_count);
          ++i) {
