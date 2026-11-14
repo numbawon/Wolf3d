@@ -1,0 +1,251 @@
+# Phase 3 (Vulkan render) — status (2026-11-13, M5.1 DONE)
+
+Branch: `phase-3-render`. Repo: C:\Users\NumbaWon\git\Wolf3d.
+Build: from git-bash `cmd /c ".build\build_arm64.bat"` → expect `BUILD_OK`.
+Run one frame: `cd .build/cmake && PATH="/c/Users/NumbaWon/git/Wolf3d/.build/deps/vulkan_loader:$PATH" ./w3d_app.exe --one-frame --screenshot <abs.bmp path>`
+(`--no-fog` disables the fog; the ARM64 loader on PATH is mandatory —
+System32 vulkan-1.dll is x64 and forces Prism.
+BMP format: 56-byte header, bottom-up RGB, stride 960, 320x200.)
+
+## Milestones
+- M1 toolchain (SDL3 ARM64 + Vulkan headers/loader ARM64 + glslang): DONE.
+- M2 test pattern (compute fills image, blit, screenshot readback, pixel-verified): DONE (commit 5e5a728).
+- M3 real raycast frame: DONE (2026-11-12). Walls/floor/ceiling + all 30 sprites +
+  pistol, PIXEL-PERFECT: full-frame diff against an independent Python reference
+  of the reference-engine semantics = 0/64000 (scratch/m3_final.bmp).
+- M4 per-pixel distance fog: DONE (2026-11-13). PLAN says "visually
+  equivalent" to the original's 24-palette fog table (no original fog data
+  is recoverable: not in VSWAP.wl6, not in the JS reference). Verified
+  against a full-frame CPU model — see below.
+- M5 live input + render loop: DONE (2026-11-13, commits 83022d7 + 0765cfe).
+- M5.1 floor/ceiling fog geometry fix: DONE (2026-11-13) — user-visible
+  "bright at the walls, dark banded floor" bug; see below.
+
+## M4 fog (design + root causes)
+Design (PLAN: "visually equivalent" to the original's 24-palette fog table):
+- 24 levels, `L = min(23, floor(dist / 1.25))`, blend `u = L/23` toward a
+  brown ramp (140,92,40) → (24,14,6). kFogStep = 1.25 cells/level → full
+  fog at 30 cells.
+- Walls/floor/ceiling (walls.comp): wall-union rows use the column's ray
+  distance t; other rows use the TRUE plane distance d = (kWallHeight/2) /
+  |row - 100| — M5.1 FIX. (Eye at mid-wall height: the floor 0.5 cells
+  below the eye projects to row 100 + 80/D; column independent; nearest
+  floor D = 0.81 at the screen edge; horizon row full fog.) The original
+  M4 formula (t/h) * |row - 100| was inverted geometry: the NEAREST floor
+  rows got the strongest fog, the floor at the wall base the least, and
+  it varied per column -> user-visible "bright at the walls, dark banded
+  floor" (live-play screenshots 2026-11-13). The per-row table (row 100
+  = 99.0 sentinel -> full fog) is CPU-computed and rides in the old
+  slope[320] slot (@10256, first 200 rows used) — all other SSBO offsets
+  unchanged, shader does a plain SSBO read (no new expression forms for
+  the driver). Note: occluded columns (h == 0, no wall rows) now get the
+  table fog on all rows (before: un-fogged); the table is column-free so
+  this matches the original's column-independent floor fade.
+- Sprites (sprites.comp): fogged at the sprite's own forward distance;
+  the weapon's distance is 0 → level 0 → unmodified, matching the
+  original's un-fogged weapon.
+Driver facts proven this phase (in-shader value probes; the fog switch
+started life as a bool UBO and migrated twice):
+1. UBO descriptor offsets must be 256-byte aligned on this driver —
+   unaligned offsets are silently clamped DOWN: a fog UBO at 33796 read
+   the 33792 count slot (probe saw step where on should be), 33808 read
+   zeros, 34048 (256*133) read correctly.
+2. `bool` UBO members are misplaced (probe read fog_on at offset 0 and
+   fog_step at offset 4). The on-flag is now a 1.0/0.0 double tested
+   `< 0.5`.
+Consequence: the fog never uses a UBO. The whole fog input set is
+computed on the CPU in render_frame (same formulas as the shader's DDA:
+top = 100 - h, fbot = floor(top + 2h), slope = t/h guarded by h > 0) and
+rides in the frame buffer's columns SSBO tail (invstep @10240, on
+@10248, slope[320] @10256, wlo[320] @12816, whi[320] @14096 — ends at
+15376 < 16384) and the sprites SSBO tail (@26624). invstep = 1/kFogStep
+so the shader only multiplies. The Counts UBO (@33792, 256-aligned) is
+the only UBO left and is unchanged from M3.
+Verification (scratch m4_verify2.py, full-frame CPU model, 2026-11-13
+final captures): 61777/64000 px match the column model within 1.5/channel
+(the GPU blends in float32, the model in float64; 11078 are bit-exact).
+All 2223 remaining px are sprite pixels, and every one matches the blend
+at its OWN sprite's forward distance (dist * 1/1.25, same double
+arithmetic as the shader) — 0 unexplained. The weapon (dist 0) is
+unmodified by design, matching the original's un-fogged weapon.
+`--no-fog` frame: byte-identical scene data between runs (fog slots
+differ by design). NOTE: back-to-back one-frame app runs can hit a
+transient GPU-teardown race (observed once: second run rendered a black
+frame with an all-zero frame buffer); put a few seconds between captures.
+ANALYSIS PITFALL (cost one full debugging cycle): the frame buffer's
+column region is 320 x 32B STRIDED records (t@0, h@8, tx@16, tex@24) and
+the sprite region 256 x 40B (x0@0, y0@8, s@16, dist@24, scale@32,
+sprite@36). Parsing them as flat double arrays (np.frombuffer with a
+count, or `arr[3::4]`) silently yields a phantom "column permutation"
+and phantom fog-level errors — every column looked like it read another
+column's data. Parse with the record stride (or struct unpack).
+
+## M3 root causes (all fixed)
+1. DRIVER BUG: this ARM64 Vulkan driver (NVIDIA RTX Spark N1X, Blackwell)
+   miscompiles `v & 0xFF` into a nonzero-test — yields 0 or 255 per byte.
+   Every byte extraction / low-byte index uses `% 256u` and `/ 256u` instead.
+   Proven by differential renders (m3_dbg10..m3_dbg11).
+2. DRIVER BUG: `uvec4` imageStore on R8G8B8A8_UNORM storage images is
+   quantized per component to {0, 255}. The float `vec4` path with
+   `(v + 0.5) / 255.0` is correct (m3_dbg12: orange painted as yellow).
+   Both shaders now write float vec4; keep it. (M2's clear.comp already used
+   float — that is why M2 verified clean.)
+3. APP BUG: `Renderer::load_atlases` built the sprite atlas with pointer
+   arithmetic at a 4096-byte stride, but `w3d::Sprite` is 4096 + 2*uint16 =
+   4100 bytes — every sprite tile after slot 0 read the wrong bytes
+   (garbage colors + the spurious black pixels; the wall atlas is a plain
+   `vector<array<uint8_t,4096>>` and was unaffected). Fixed by passing
+   `sprites.data()` / `walls.data()` and dereferencing `(*entries[t])[i]`.
+   The wall pass itself was never the problem: it uses 200 uint32 locals
+   (~250 KB > the GPU's 48 KB maxComputeSharedMemorySize, but the driver
+   handles it fine — output verified pixel-perfect, no redesign needed).
+
+## Verification machinery (kept in the code, used for M4 too)
+- GPU mirror buffer: `dbg_buf_` copies `frame_buf_`→host-visible each frame
+  (`VK_BUFFER_USAGE_TRANSFER_SRC_BIT`), dumped to
+  scratch/dbg_framebuf.bin on readback. Proves upload correctness (M3).
+  Layout: columns 0 (320x32B: t@0, h@8, tx@16, tex@24, pad@28), fog tail
+  10240 (invstep@0, on@8, slope[320]@16, wlo[320]@2576, whi[320]@3856),
+  sprites 16384 (256x40B: x0@0, y0@8, s@16, dist@24, scale@32, sprite@36),
+  sprite fog tail 26624 (invstep, on), palette 32768 (256x4B RGBA),
+  count 33792. STRIDED — never parse flat (see M4 pitfall).
+- One-shot GPU info print in the renderer constructor (name + compute
+  limits). GPU: RTX Spark N1X, sharedMemMax=48 KB, wgSizeMax=(1024,1024,64).
+- Python pixel-perfect reference (scratch, rebuildable from VSWAP.WL6 +
+  dbg_framebuf.bin + scratch/atlas_ref.bin): exact float64 reference
+  accumulation for walls, reference drawThings/drawSprite semantics for
+  sprites (far-to-near last-write per sprite, nearest sprite wins, per-column
+  z test). atlas_ref.bin = concatenated 64x64 idx images of the 30 sprites
+  (probe_atlas.cpp in scratch regenerates it).
+- Reference semantics authority: reference JS engine (scratch ref_engine.js).
+  Closed-form row mapping verified against the reference's float accumulation:
+  200k random trials, 0 mismatches. GPU doubles are exact IEEE float64.
+
+## State of the files (M4)
+- src/render/shaders/walls.comp — driver-workaround comment block at top;
+  fog via SSBO tail arrays (slope/wlo/whi) + fog_mixed(); CPU-computed
+  fog inputs. No debug markers left.
+- src/render/shaders/sprites.comp — fog at the sprite's own forward
+  distance via the sprites SSBO tail (invstep, on doubles).
+- src/render/renderer.cpp — render_frame computes the fog inputs on the
+  CPU (wlo/whi per column; static per-row plane-distance table, 200
+  doubles in the old slope[320] slot @10256) and uploads them in the
+  frame-buffer tail; FogUpload{double invstep; double on}; frame buffer
+  34064 B.
+- src/render/renderer.hpp — render_frame takes fog_on; buffer layout
+  comment.
+- src/render/frame.hpp — kFogStep (1.25 cells/level).
+- src/main.cpp — --no-fog flag.
+- CMakeLists.txt — stamp-based shader copy (KEEP — real fix from the
+  M2→M3 stale-shader bug).
+- src/main.cpp — /"base" data path (KEEP).
+- clear.comp deleted (M2 shader, replaced).
+
+## Tests
+173 (w3d_tests) + 386 (w3d_sim_tests) = 559 checks, 0 failures (post-M5.1).
+
+## Next
+DONE — see Phase 3 acceptance below (2026-11-14).
+
+## Phase 3 acceptance (2026-11-14, DONE)
+Harness (scratch w3d_ref/, kept outside the repo): a headless Node driver
+runs the reference JS engine (vpoupet/wolfenstein, clean-room reference —
+the PLAN's "GOG/Steam modern port" comparison target in spirit; no Steam
+port is scriptable headless) on the real Steam game data and writes the
+final RGBA frame; w3d_app --script <same ticks> --no-fog --screenshot
+renders the same script; diff_frame.py compares 320x200. Timing note:
+the reference draws every other tick (30 fps), we draw every tick —
+--frames must equal the reference's TICK count; both final frames use
+the post-tick pose (poses verified bit-identical via --pose and the
+harness's dump-things).
+
+Scenes (each final view contains 90-99 plane1 cells — the open P2
+question):
+- A base level 1 (Wolf1 Map2), 64 ticks idle: cells (16,60) val 92,
+  (16,53) val 96.
+- B base level 33 (Wolf4 Map4), 72 ticks walking east: cell (8,17) val 90.
+- C SOD level 1 (Tunnels 2), 170 ticks: activate door (30,37) at tick 0,
+  push through, walk NNE: cells (33,33) val 97, (34,34) val 96.
+- D base level 0 (Wolf1 Map1), 64 ticks idle (fog visual only).
+
+Results (2026-11-14, post-fix):
+- A: 0/64000 mismatched — PIXEL-PERFECT vs the reference engine.
+- B: 0/64000 — PIXEL-PERFECT.
+- C: 0/64000 — PIXEL-PERFECT.
+- Fog-on captures A-D visually verified: coherent scenes, fog fades
+  distance, no tearing/black bands/sprite corruption.
+- plane1 90-99: CONFIRMED INERT. The reference's level load handles
+  19-22 (start), 23-70 (props), 98 (secret), 124 (corpse), 108+ (enemies)
+  — nothing in 90-99 — and all three pixel-diff scenes have 90-99 cells
+  in the final view while rendering identical. Closes the P2
+  "unresolved" note.
+
+Bugs found + fixed in the app during the acceptance pass (the reference
+engine is the authority throughout):
+1. Sprite relative coords used the POST-tick player pose. Reference
+   order: Thing.update() computes rx/ry from the PRE-tick player, then
+   player.update() moves. Frame gained sp_* pre-tick pose fields; sprite
+   math uses them (orientable facing still uses the live player). B:
+   2863 px -> 1 px.
+2. Wall prefill bands: the reference fills ceiling rows [0, ~~(100-h)]
+   and floor rows [199-~~(100-h), 199] (JS truncation), then the wall
+   DDA overwrites its own rows. Our floor(top+2h) boundary was off by
+   one row near-integer top. (Scene B's last pixel.)
+3. tx=1.0 degenerate: the reference indexes wall-chunk column 64 ->
+   column 0 of the NEXT texture, clamped at 105. Replicated in walls.comp.
+   (Scene A's 80 residual px at column 0.)
+4. Sprite block offset evaluation order: the reference computes
+   x0 + ~~(c * height / 64) — multiply before divide. SpriteRecord now
+   carries th (per-sprite height); sprites.comp uses floor(c*th/64.0).
+5. EW-door side-wall step in the CPU DDA: rfy -= dt*dx must be
+   rfy -= dt*dy (dt = rfx/dx, the x-crossing). Scene C's 63 px: t values
+   matched to full precision and only tx was wrong.
+6. VSWAP sprite decode rewritten for the true format: 32-bit offset
+   table, per-sprite (firstCol,lastCol) headers, per-column offset
+   sub-table, 6-byte RLE records (endRow, poolOff, startRow) over a
+   shared pixel pool. The old contiguous-chunk decode happened to
+   produce acceptable sprites for scenes A/B; output identical before/
+   after for those scenes.
+7. SOD weapon sprite: SOD repacks VSWAP sprites with a -15 offset
+   (pistol frames 406-410 == base 421-425, byte-identical). build_frame
+   takes weapon_shift = -15 in --sod mode.
+8. main.cpp: '#' comment lines in scripts, --pose debug flag, pre-tick
+   pose capture before sim.tick().
+
+Verification pitfall (cost a cycle): the cross-checking Python
+transcription of the reference DDA had been copied from OUR code and
+therefore carried bug 5 with it — t values matched while tx diverged,
+which read as "the reference deviates". Transcribe cross-checkers from
+the reference source, never from the code under test.
+
+Tests: 173 (w3d_tests) + 386 (w3d_sim_tests) green post-acceptance.
+
+## M5 (2026-11-13, DONE)
+Live input + render loop (commits 83022d7 + 0765cfe): SDL3 keyboard
+(case-insensitive keymap — SDL3 3.4.20 capitalizes key names) + relative
+mouse turning (sign-per-tick) + mouse capture (first left click; while
+captured, left click fires; Esc quits) + per-second fps line (~52 fps
+N1X). `--script FILE` deterministic mode: lines "START END KEY" (held on
+START..END-1) / "START shoot" / "START activate"; TOTAL ticks = --frames;
+after the last range the player idles (enemies still tick) and the
+screenshot is the LAST frame — so a probe that reproduces a scripted
+capture must use the EXACT same move list and dump at the last input
+tick. write_bmp header `#pragma pack(1)` fix (54-byte standard header).
+
+## M5.1 floor/ceiling fog fix (2026-11-13, DONE)
+Bug (user live-play screenshots): floor "dark in the center, bright at
+the walls, dark bands beyond" — M4's per-column (t/h) * |row-100| is
+inverted plane geometry (strongest fog on the NEAREST floor rows, least
+at the wall base, per-column banding). Fix: per-row table
+D(row) = (kWallHeight/2) / |row-100| (row 100 -> 99.0 sentinel = full
+fog), CPU-computed, uploaded in the old slope[320] slot; shader = plain
+SSBO read (no new expression forms for the driver quirks). Verified:
+hall back-view frame 25575 floor+ceiling px and center-view frame 36997
+px vs the CPU model = 0 mismatches, sprites excluded by EXACT
+painted-pixel simulation (posted-texel expansion with per-column z test;
+verify_fog5.py in scratch). Walls/sprites byte-identical old->new
+(full-frame diff: only floor/ceiling fog rows changed). 173+386 green.
+Investigated, NOT a bug: sprite 16 (prop, plane1 37) posts only rows
+0-9 + 59-63 (transparent middle) — at close range its posted texels
+project off-screen (top above, bottom below) -> 0 painted px, exactly
+per the reference semantics (CPU sim == GPU == 0).

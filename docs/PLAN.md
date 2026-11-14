@@ -4,6 +4,13 @@ Clean-room modern engine remake of Wolfenstein 3D. No original source code is
 used; all formats are derived from the shipped binaries/data files and verified
 empirically (pixel/audio golden checks) before any consumer is built.
 
+## Deliverable
+
+A single standalone native binary — modern stack (C++23/MSVC, SDL3 + Vulkan +
+miniaudio), runs directly on the host OS. No DOS, no DOSBox, no emulation, no
+runtime network; the only external input is the game data files. Visual
+verification uses the modern GOG/Steam port as reference, never DOSBox.
+
 ## Source material (on-disk, read-only)
 
 Install root: `C:\Program Files (x86)\Steam\steamapps\common\Wolfenstein 3D`
@@ -14,7 +21,7 @@ Install root: `C:\Program Files (x86)\Steam\steamapps\common\Wolfenstein 3D`
 | `base/*.WL6` | GOG `TED5v1.0` container data — main game (episodes 1–2) |
 | `base/m1/Spear.exe` | Original 1992 DOS executable, LZEXE 0.91 packed (Spear of Destiny) |
 | `base/m1/*.SOD` | Spear of Destiny data; mixed flavors: `GAMEMAPS.SOD` is TED5, `VGAGRAPH.SOD` is raw/wrapped — flavor determined per file in phase 1 |
-| `DOSBox/` | DOSBox 0.74-3 + `wolf3d.conf` (reference for original behavior) |
+| `DOSBox/` | Ships with the install (for the 1992 original). Not used by this project — not in the build, the runtime, or the verification. |
 
 Game data is read from the install directory at runtime (path via config).
 The repo never stores the full game assets.
@@ -54,7 +61,9 @@ Vulkan mapping:
 ## Audio design
 
 - Original: 8-bit mono chunks in AUDIOT (per-chunk rate, to be pinned in
-  phase 1); music via OPL FM data (to be located in the containers).
+  phase 1); music as OPL FM data (to be located in the containers), replayed
+  by a software FM synthesizer in the miniaudio pipeline — the chip is
+  emulated in code; no sound hardware or DOS involved.
 - Pipeline: miniaudio mixer; decode chunks to 16-bit float32 internal;
   resampling stage accepts ANY input rate/width — the hi-res audio hook.
 - SFX: positional (pan by angle, volume by distance) per original behavior.
@@ -97,11 +106,19 @@ docs/        plan, format write-ups
    cycles, key locks, 2x64-tick pushwalls, grid-DDA LOS, one-shot static
    enemies, elevator exit; acceptance walk of all 81 maps x 2000 ticks with
    byte-identical deterministic transcripts and no crashes. Unresolved,
-   documented: plane1 90-97/99 (inert; Phase 3 screenshot check).
+   documented: plane1 90-97/99 (inert; Phase 3 screenshot check) —
+   resolved in the Phase 3 acceptance (2026-11-14): confirmed inert,
+   renders identically with such cells in view.
 3. `phase-3-render` — Vulkan raycaster + SDL3 window; walls, floors, sprites,
    fog; HiDPI.
-   ACCEPT: screenshot comparison against reference (DOSBox/modern port)
-   scenes is visually faithful.
+   ACCEPT: screenshot comparison against the GOG/Steam modern port (reference
+   only) scenes is visually faithful. The deliverable is the standalone
+   native binary; it never runs under DOSBox.
+   **DONE (2026-11-14, aaf66fb)** — pixel-perfect against the reference JS engine on
+   all three pixel-diff acceptance scenes (0/64000 each, --no-fog: Wolf1
+   Map2 idle, Wolf4 Map4 walk, SOD Tunnels 2 door); plane1 90-99 confirmed
+   inert (cells in view, identical output); fog verified visually on 4
+   scenes; 173+386 checks green. See docs/phase-3-status.md.
 4. `phase-4-audio` — mixer, SFX, music.
    ACCEPT: audible, correctly positioned; resampling hook demonstrated with
    a 16-bit/44.1k drop-in.

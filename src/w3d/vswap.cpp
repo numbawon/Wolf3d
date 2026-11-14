@@ -48,48 +48,62 @@ Result<Sprite> decode_sprite(std::span<const std::byte> spr) {
     std::vector<std::uint16_t> coloffs(ncols);
     for (std::size_t i = 0; i < ncols; ++i)
         coloffs[i] = le16(spr.data() + 4 + 2 * i);
-    const std::size_t posts_start = coloffs[0];
-    const std::size_t pool_start = table_end;
-    if (posts_start < pool_start || posts_start > l)
-        return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: bad posts offset"));
-    const std::byte* pool = spr.data() + pool_start;
-    const std::size_t pool_len = posts_start - pool_start;
+    // Layout inside a sprite chunk (reference drawSprite):
+    //   [0,4)                 firstCol, lastCol
+    //   [4, table_end)        per-column post-table offsets (relative)
+    //   [table_end, pool_end) pixel pool: one byte per posted row, consumed
+    //                         sequentially in column order, then run order,
+    //                         then ascending row; padded with at most one
+    //                         stray byte so the post tables stay aligned
+    //   [pool_end, ...)       the post tables, packed in column order; each
+    //                         is a run list of 6-byte records:
+    //                         endRow u16 (x2), run-field u16 (skipped by the
+    //                         reference), startRow u16 (x2), terminated by
+    //                         a u16 zero.
+    const std::size_t pool_end =
+        *std::min_element(coloffs.begin(), coloffs.end());
+    if (pool_end <= table_end || pool_end > l)
+        return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: bad pool bounds"));
+    const std::byte* pool = spr.data() + table_end;
+    const std::size_t pool_len = pool_end - table_end;
 
     std::fill(sp.idx.begin(), sp.idx.end(), 255u);
     sp.first_col = fc;
     sp.last_col = lc;
 
     std::size_t pix_i = 0;
-    std::size_t pi = posts_start;
-    for (std::uint16_t c = fc; c <= lc; ++c) {
+    for (std::size_t i = 0; i < ncols; ++i) {
+        // The reference jumps to each column's post table via the offset
+        // table rather than walking continuously.
+        std::size_t pi = coloffs[i];
+        const auto c = static_cast<std::size_t>(fc) + i;
         while (true) {
             if (pi + 2 > l)
                 return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: post table truncated"));
             const auto e1 = le16(spr.data() + pi);
-            pi += 2;
             if (e1 == 0)
                 break;  // column terminator
-            if (pi + 4 > l)
+            if (pi + 6 > l)
                 return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: post entry truncated"));
-            (void)le16(spr.data() + pi);  // m1: not used for counting
-            const auto s1 = le16(spr.data() + pi + 2);
-            pi += 4;
+            // bytes pi+2..pi+3 carry a per-run field the reference skips.
+            const auto s1 = le16(spr.data() + pi + 4);
+            pi += 6;
             const std::size_t rstart = s1 / 2;
             const std::size_t rend = e1 / 2;
-            for (std::size_t r = rstart; r < rend; ++r) {
-                if (pix_i >= pool_len || r >= 64)
-                    return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: pool/row overflow"));
-                sp.idx[r * 64 + c] = static_cast<std::uint8_t>(pool[pix_i++]);
+            if (rend > 64)
+                return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: run past 64 rows"));
+            if (rstart < rend) {
+                for (std::size_t r = rstart; r < rend; ++r) {
+                    if (pix_i >= pool_len)
+                        return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: pool underflow"));
+                    sp.idx[r * 64 + c] = static_cast<std::uint8_t>(pool[pix_i++]);
+                }
             }
         }
     }
-    // The pool is padded with one 0x00 byte when the pixel count is odd
-    // (2-byte alignment); the reference engine never reads the pad byte.
-    if (pool_len < pix_i || pool_len - pix_i > 1 ||
-        (pool_len - pix_i == 1 && pool[pool_len - 1] != std::byte{0}))
+    // At most one pad byte may remain in the pool region.
+    if (pool_len - pix_i > 1)
         return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: bad pixel pool size"));
-    if (pi != l)
-        return std::unexpected(make_error(Error::Kind::Corrupt, "sprite: post table does not end at chunk end"));
     return sp;
 }
 
