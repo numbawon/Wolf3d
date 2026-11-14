@@ -9,7 +9,8 @@
 //   --script FILE   text lines:
 //     - "START END KEY ...": movement keys (ArrowUp ArrowDown ArrowLeft
 //       ArrowRight z s q d) held on ticks START..END-1;
-//     - "START shoot" / "START activate": one-shot event on tick START.
+//     - "START shoot" / "START activate": one-shot event on tick START;
+//     - lines starting with '#' are comments.
 //
 // Without a script the window accepts live keyboard + mouse input: left-
 // click captures the mouse for turning (while captured, left click fires,
@@ -74,6 +75,7 @@ struct Args {
     uint32_t frames = 0;  // 0 = run until closed
     bool one_frame = false;
     bool no_fog = false;
+    bool pose = false;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -95,6 +97,8 @@ Args parse_args(int argc, char** argv) {
             a.one_frame = true;
         } else if (std::strcmp(argv[i], "--no-fog") == 0) {
             a.no_fog = true;
+        } else if (std::strcmp(argv[i], "--pose") == 0) {
+            a.pose = true;
         } else {
             std::fprintf(stderr,
                          "usage: w3d_app [--level N] [--sod] "
@@ -166,6 +170,8 @@ struct Script {
         held.assign(ticks, 0);
         std::string line;
         while (std::getline(f, line)) {
+            if (!line.empty() && line[0] == '#')
+                continue;  // comment
             std::istringstream is(line);
             std::string tok;
             if (!(is >> tok))
@@ -292,6 +298,9 @@ int main(int argc, char** argv) {
         std::array<Frame::ActorSnap, w3d::render::kMaxSprites> prev_snap{};
         int prev_snap_count = 0;
         int prev_weapon_cooldown = 0;
+        // The SOD VSWAP is re-packed: its pistol frames (byte-identical to
+        // the base bank's 421..425) live at 406..410.
+        const int weapon_shift = args.sod ? -15 : 0;
         std::array<std::uint32_t, 256> palette{};
         w3d::render::effective_palette(flash, palette);
 
@@ -333,12 +342,17 @@ int main(int argc, char** argv) {
                 quit = true;
 
             // One simulation tick + one rendered frame. live.take() already
-            // folds in this tick's relative-mouse turn.
+            // folds in this tick's relative-mouse turn. The pre-tick pose is
+            // snapshotted for the renderer: the reference computes thing
+            // relative coordinates before the player moves (see frame.hpp).
+            const w3d::render::Pose pre_pose{sim.x(), sim.y(), sim.dx(),
+                                             sim.dy()};
             const SimInput in = scripted ? script.input_for(frame_idx)
                                          : live.take();
             sim.tick(in);
-            w3d::render::build_frame(frame, sim, prev_snap, prev_snap_count,
-                                     prev_weapon_cooldown);
+            w3d::render::build_frame(frame, sim, pre_pose, prev_snap,
+                                     prev_snap_count, prev_weapon_cooldown,
+                                     weapon_shift);
             prev_weapon_cooldown = sim.weapon_cooldown();
             prev_snap = frame.actor_snap;
             prev_snap_count = frame.actor_snap_count;
@@ -382,6 +396,10 @@ int main(int argc, char** argv) {
             if (!scripted)
                 SDL_Delay(16);  // ~60 Hz
         }
+    }
+    if (args.pose) {
+        std::printf("pose x=%.17g y=%.17g dx=%.17g dy=%.17g\n", sim.x(),
+                    sim.y(), sim.dx(), sim.dy());
     }
     vkDestroyInstance(instance, nullptr);
     SDL_Quit();

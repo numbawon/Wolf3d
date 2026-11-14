@@ -90,26 +90,45 @@ void main() {
     Col c = cb.columns[x];
     double h = c.h;                 // wall half-height in px (wallHeight/2t)
     double top = 100.0 - h;         // wall top edge (reference H/2 - h)
-    double fbot = floor(top + 2.0 * h);  // first floor row (reference: 199-yi0)
     double s = h / 32.0;            // px per texel (reference h/32)
     double stepi = floor(s);        // integer rows per texel
     double stepf = s - stepi;       // fractional remainder
-    uint texcol = uint(floor(64.0 * c.tx));  // reference ~~(64 * tx)
+    // Reference ~~(64 * tx): tx is [0,1] and can be exactly 1.0 (a ray
+    // that starts on a cell boundary, extreme screen columns). JS then
+    // indexes column 64 — i.e. column 0 of the NEXT texture (the 4096-byte
+    // offset arithmetic overflows into the next chunk). Replicate that;
+    // the clamp stops the read at the last tile of the base VSWAP bank
+    // (106 wall chunks; SOD reuses the same bank), which is where the
+    // reference's own read would run past the shipped data anyway.
+    uint texcol = uint(floor(64.0 * c.tx));
+    uint tidx = c.tex + (texcol > 63u ? 1u : 0u);
+    texcol = (texcol > 63u ? 0u : texcol);
+    if (tidx > 105u)
+        tidx = 105u;
     // Wall atlas is row-major (row*64+col); the reference reads the 64
     // texels of column texcol top to bottom.
-    uint base = c.tex * 4096u + texcol;
+    uint base = tidx * 4096u + texcol;
 
-    // Default fill: ceiling above the wall's union, floor below. The wall
-    // pass below overwrites exactly the union rows [max(0, floor(top)),
-    // min(200, fbot)), so the default only shows outside it.
+    // Reference prefill (drawWalls): ceiling rows j = 0..yi (j <= yi0) and
+    // floor rows pixelHeight-1-j = 199..199-yi0, where yi0 = ~~(100 - h).
+    // The two bands OVERLAP the wall region (ceiling reaches row yi0, the
+    // wall's first row; floor starts at 199-yi0, adjacent to the wall's
+    // last row) and the wall DDA below overwrites its own union. Using
+    // floor(top + 2h) as the boundary here was off by one row when top is
+    // near an integer: the reference's floor starts at 199 - ~~(100-h),
+    // not at floor(100-h+2h).
+    double ytrunc = (top >= 0.0) ? floor(top) : ceil(top);  // JS ~~
+    const int yi0 = int(ytrunc);
     uint rows[200];
     for (uint row = 0u; row < 200u; ++row)
-        rows[row] = (double(row) < fbot) ? color[29] : color[25];
+        rows[row] = (int(row) <= yi0) ? color[29]
+                 : (int(row) >= 199 - yi0) ? color[25]
+                 : 0u;  // wall region: the DDA below writes every row of it
 
     // Reference 64-texel vertical DDA. yi/yf start at the wall's top edge
     // (reference: yi = ~~(H/2 - h), yf = (H/2 - h) % 1).
-    double yi = floor(top);
-    double yf = top - floor(top);
+    double yi = ytrunc;
+    double yf = top - ytrunc;
     for (uint j = 0u; j < 64u; ++j) {
         // DRIVERS BUG (2026-11-12): this ARM64 Vulkan driver miscompiles
         // `v & 0xFF` into a nonzero-test (0 or 0xFF). Use % 256 arithmetic

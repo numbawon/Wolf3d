@@ -47,10 +47,19 @@ struct ColumnRecord {
 struct SpriteRecord {
     double x0 = 0.0;   // screen column of the sprite's left edge
     double y0 = 0.0;   // screen row of the sprite's top edge
-    double s = 0.0;    // texel -> px factor = th / 64
+    double s = 0.0;    // texel -> px factor = th / 64 (scan bound only)
+    double dist = 0.0;  // forward distance (z test vs column t)
+    double th = 0.0;    // sprite height in px (reference `height`): the
+                        // reference places texel column c's block at
+                        // x0 + ~~(c * height / 64) — left-to-right, so the
+                        // shader must multiply by th and divide by 64
     std::uint32_t scale = 1;  // reference: ceil(th / 64)
     std::uint32_t sprite = 0; // resolved VSWAP sprite index
-    double dist = 0.0;  // forward distance (z test vs column t)
+};
+
+// Player pose at a point in the tick cycle.
+struct Pose {
+    double x = 0.5, y = 0.5, dx = 0.0, dy = -1.0;
 };
 
 // Per-tick frame state handed to the renderer.
@@ -74,6 +83,13 @@ struct Frame {
     int sprite_count = 0;
 
     double px = 0.5, py = 0.5, pdx = 0.0, pdy = -1.0;
+    // Pre-tick player pose (the pose the tick started from). The reference
+    // computes each thing's relative coordinates (Thing.update) BEFORE
+    // player.update() moves the player, so sprite screen geometry, culling
+    // and the z-test distance use this pose, while the wall DDA uses the
+    // post-tick pose above. (drawThings recomputes the orientable facing
+    // angle from the live player, so that one uses px/py.)
+    double sp_px = 0.5, sp_py = 0.5, sp_pdx = 0.0, sp_pdy = -1.0;
     std::uint32_t weapon_sprite = 421;  // 421 pistol, 422..425 firing
 
     // Flash event detected this frame by diffing actor state:
@@ -107,14 +123,20 @@ void update_flash(Flash& fl, int event);
 void effective_palette(const Flash& fl,
                        std::array<std::uint32_t, 256>& out);
 
-// Fill `f` from one simulation state (call after each tick). `prev_snap` is
+// Fill `f` from one simulation state (call after each tick). `prev_pose` is
+// the player pose BEFORE this tick's movement (the pose the tick started
+// from; on the first frame the spawn pose): the reference computes thing
+// relative coordinates before moving the player, so sprite screen geometry
+// uses it while the wall DDA uses the post-tick pose. `prev_snap` is
 // the previous frame's actor snapshot (all-present on the first frame); it
 // drives the flash event detection. `prev_weapon_cooldown` is the previous
 // frame's sim cooldown counter (resolves the last 424 frame of the firing
-// animation, see weapon_sprite).
-void build_frame(Frame& f, const game::Simulation& sim,
+// animation, see weapon_sprite). `weapon_shift` is the VSWAP bank offset of
+// the pistol frames (0 for the base bank; -15 for SOD, whose re-packed
+// VSWAP holds the byte-identical pistol at 406..410).
+void build_frame(Frame& f, const game::Simulation& sim, const Pose& prev_pose,
                  const std::array<Frame::ActorSnap, kMaxSprites>& prev_snap,
-                 int prev_snap_count, int prev_weapon_cooldown);
+                 int prev_snap_count, int prev_weapon_cooldown, int weapon_shift);
 
 // Weapon sprite index from the sim's cooldown counter and the previous
 // frame's counter (reference: 421 at rest; while firing, 421 for six ticks,

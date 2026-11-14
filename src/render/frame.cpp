@@ -218,7 +218,7 @@ void build_columns(Frame& f, const Simulation& sim) {
                         // hit the side wall
                         const double dt = rfx / dx;
                         t += dt;
-                        rfy -= dt * dx;
+                        rfy -= dt * dy;
                         rfx = 1;
                         cx += stepx;
                         texture_index = 101;
@@ -281,11 +281,14 @@ void build_sprites(Frame& f, const Simulation& sim) {
     for (const auto& a : level.actors) {
         if (a.removed)
             continue;
-        // Thing.update: relative coordinates in the player's frame
-        const double rx0 = a.wx() - f.px;
-        const double ry0 = a.wy() - f.py;
-        const double rx = rx0 * f.pdx + ry0 * f.pdy;
-        const double ry = -rx0 * f.pdy + ry0 * f.pdx;
+        // Thing.update: relative coordinates in the player's frame. The
+        // reference runs this BEFORE player.update() moves the player, so
+        // the pose is the tick's starting pose (f.sp_*), one tick stale
+        // relative to the wall DDA when the player is in motion.
+        const double rx0 = a.wx() - f.sp_px;
+        const double ry0 = a.wy() - f.sp_py;
+        const double rx = rx0 * f.sp_pdx + ry0 * f.sp_pdy;
+        const double ry = -rx0 * f.sp_pdy + ry0 * f.sp_pdx;
         things.push_back({rx, ry, &a});
     }
     std::stable_sort(things.begin(), things.end(),
@@ -305,6 +308,7 @@ void build_sprites(Frame& f, const Simulation& sim) {
         w.scale = static_cast<std::uint32_t>(std::ceil(height / 64.0));
         w.sprite = f.weapon_sprite;
         w.dist = 0.0;  // always passes the z test (reference: no z test)
+        w.th = height;
     }
 
     // Things, nearest first. The reference's early `return` on
@@ -320,16 +324,22 @@ void build_sprites(Frame& f, const Simulation& sim) {
 
         const double h = kWallHeight / th.rx;
         SpriteRecord& r = f.sprites[out];
-        r.x0 = std::floor((th.ry / th.rx + kFov) * kWallHeight - h / 2.0);
-        r.y0 = std::floor((kRows - h) / 2.0);
+        // Reference drawThings: tx/ty use JS ~~ (truncation toward zero),
+        // which differs from floor for negative non-integers (close sprites
+        // can project partly off-screen).
+        r.x0 = js_trunc((th.ry / th.rx + kFov) * kWallHeight - h / 2.0);
+        r.y0 = js_trunc((kRows - h) / 2.0);
         r.s = h / 64.0;
         r.scale = static_cast<std::uint32_t>(std::ceil(h / 64.0));
         r.dist = th.rx;
+        r.th = h;
 
         std::uint32_t idx = th.a->sprite;
         if (th.a->def != nullptr && th.a->def->orientable) {
-            // 8-way facing variant (reference drawThings): Math.round is
-            // applied to (angle steps - direction) as a whole.
+            // 8-way facing variant (reference drawThings): computed from the
+            // LIVE player (draw() runs after player.update()), not the stale
+            // sprite pose. Math.round is applied to (angle steps - direction)
+            // as a whole.
             const double ang = std::atan2(th.a->wx() - f.px, th.a->wy() - f.py);
             const double v = js_round(4.0 * ang / std::numbers::pi_v<double> -
                                       static_cast<double>(th.a->direction));
@@ -404,16 +414,24 @@ void effective_palette(const Flash& fl,
     }
 }
 
-void build_frame(Frame& f, const Simulation& sim,
+void build_frame(Frame& f, const Simulation& sim, const Pose& prev_pose,
                  const std::array<Frame::ActorSnap, kMaxSprites>& prev_snap,
-                 int prev_snap_count, int prev_weapon_cooldown) {
+                 int prev_snap_count, int prev_weapon_cooldown,
+                 int weapon_shift) {
     const auto& level = sim.level();
 
     f.px = sim.x();
     f.py = sim.y();
     f.pdx = sim.dx();
     f.pdy = sim.dy();
-    f.weapon_sprite = weapon_sprite(sim.weapon_cooldown(), prev_weapon_cooldown);
+    f.sp_px = prev_pose.x;
+    f.sp_py = prev_pose.y;
+    f.sp_pdx = prev_pose.dx;
+    f.sp_pdy = prev_pose.dy;
+    const int ws = static_cast<int>(
+                       weapon_sprite(sim.weapon_cooldown(), prev_weapon_cooldown)) +
+                   weapon_shift;
+    f.weapon_sprite = static_cast<std::uint32_t>(ws);
 
     for (std::size_t i = 0; i < 4096; ++i) {
         f.plane0[i] = level.plane0[i];

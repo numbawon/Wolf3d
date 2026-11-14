@@ -106,12 +106,19 @@ docs/        plan, format write-ups
    cycles, key locks, 2x64-tick pushwalls, grid-DDA LOS, one-shot static
    enemies, elevator exit; acceptance walk of all 81 maps x 2000 ticks with
    byte-identical deterministic transcripts and no crashes. Unresolved,
-   documented: plane1 90-97/99 (inert; Phase 3 screenshot check).
+   documented: plane1 90-97/99 (inert; Phase 3 screenshot check) —
+   resolved in the Phase 3 acceptance (2026-11-14): confirmed inert,
+   renders identically with such cells in view.
 3. `phase-3-render` — Vulkan raycaster + SDL3 window; walls, floors, sprites,
    fog; HiDPI.
    ACCEPT: screenshot comparison against the GOG/Steam modern port (reference
    only) scenes is visually faithful. The deliverable is the standalone
    native binary; it never runs under DOSBox.
+   **DONE (2026-11-14)** — pixel-perfect against the reference JS engine on
+   all three pixel-diff acceptance scenes (0/64000 each, --no-fog: Wolf1
+   Map2 idle, Wolf4 Map4 walk, SOD Tunnels 2 door); plane1 90-99 confirmed
+   inert (cells in view, identical output); fog verified visually on 4
+   scenes; 173+386 checks green. See docs/phase-3-status.md.
 4. `phase-4-audio` — mixer, SFX, music.
    ACCEPT: audible, correctly positioned; resampling hook demonstrated with
    a 16-bit/44.1k drop-in.

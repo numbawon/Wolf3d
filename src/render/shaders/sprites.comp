@@ -26,6 +26,7 @@ struct Spr {
     double y0;
     double s;
     double dist;
+    double th;
     uint scale;
     uint sprite;
 };
@@ -81,12 +82,16 @@ void main() {
 
         // Largest texel column that can cover u: floor(c*s) <= u <
         // floor(c*s) + scale. floor(c*s) grows with c, so scan down from the
-        // upper bound c < (u + 1) / s; stop once no smaller column can cover.
-        double cmax = ceil((u + 1.0) / sp.s) - 1.0;
+        // upper bound (with a +1 ULP margin over the true bound); stop once
+        // no smaller column can cover.
+        double cmax = ceil((u + 1.0) / sp.s) + 1.0;
         int c = (cmax > 63.0) ? 63 : (cmax < 0.0 ? 0 : int(cmax));
         uint drawn = 0u;
         for (uint cc = 0u; cc <= 64u && c >= 0 && drawn == 0u; ++cc) {
-            double lo = floor(double(c) * sp.s);
+            // Reference drawSprite places the block at x0 + ~~(c * height /
+            // 64) — the multiplication by height happens BEFORE the
+            // division, so evaluate in that order for bit-identity.
+            double lo = floor(double(c) * sp.th / 64.0);
             if (lo <= u - double(sp.scale))
                 break;  // no smaller column covers this pixel
             // Both bounds: for u < lo the block starts right of the pixel
@@ -95,10 +100,10 @@ void main() {
                 // This column covers X: find its last posted row covering Y.
                 // Rows are drawn ascending, so the largest covering posted r
                 // wins. floor(r*s) grows with r; same scan shape as above.
-                double rmax = ceil((v + 1.0) / sp.s) - 1.0;
+                double rmax = ceil((v + 1.0) / sp.s) + 1.0;
                 int r = (rmax > 63.0) ? 63 : (rmax < 0.0 ? 0 : int(rmax));
                 for (uint rr = 0u; rr <= 64u && drawn == 0u; ++rr) {
-                    double lor = floor(double(r) * sp.s);
+                    double lor = floor(double(r) * sp.th / 64.0);
                     if (lor <= v - double(sp.scale))
                         break;  // no smaller row covers this pixel
                     // Both bounds: the scan starts above the pixel, and for

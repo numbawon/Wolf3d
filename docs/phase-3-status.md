@@ -145,10 +145,80 @@ column's data. Parse with the record stride (or struct unpack).
 173 (w3d_tests) + 386 (w3d_sim_tests) = 559 checks, 0 failures (post-M5.1).
 
 ## Next
-P3 acceptance (visual pass incl. plane1 90-99 check), then phase end:
-commit phase-3-render, merge --no-ff into main ("Merge phase-3-...: ..."),
-push origin main + phase branch, update docs/PLAN.md DONE note with the
-commit hash.
+DONE — see Phase 3 acceptance below (2026-11-14).
+
+## Phase 3 acceptance (2026-11-14, DONE)
+Harness (scratch w3d_ref/, kept outside the repo): a headless Node driver
+runs the reference JS engine (vpoupet/wolfenstein, clean-room reference —
+the PLAN's "GOG/Steam modern port" comparison target in spirit; no Steam
+port is scriptable headless) on the real Steam game data and writes the
+final RGBA frame; w3d_app --script <same ticks> --no-fog --screenshot
+renders the same script; diff_frame.py compares 320x200. Timing note:
+the reference draws every other tick (30 fps), we draw every tick —
+--frames must equal the reference's TICK count; both final frames use
+the post-tick pose (poses verified bit-identical via --pose and the
+harness's dump-things).
+
+Scenes (each final view contains 90-99 plane1 cells — the open P2
+question):
+- A base level 1 (Wolf1 Map2), 64 ticks idle: cells (16,60) val 92,
+  (16,53) val 96.
+- B base level 33 (Wolf4 Map4), 72 ticks walking east: cell (8,17) val 90.
+- C SOD level 1 (Tunnels 2), 170 ticks: activate door (30,37) at tick 0,
+  push through, walk NNE: cells (33,33) val 97, (34,34) val 96.
+- D base level 0 (Wolf1 Map1), 64 ticks idle (fog visual only).
+
+Results (2026-11-14, post-fix):
+- A: 0/64000 mismatched — PIXEL-PERFECT vs the reference engine.
+- B: 0/64000 — PIXEL-PERFECT.
+- C: 0/64000 — PIXEL-PERFECT.
+- Fog-on captures A-D visually verified: coherent scenes, fog fades
+  distance, no tearing/black bands/sprite corruption.
+- plane1 90-99: CONFIRMED INERT. The reference's level load handles
+  19-22 (start), 23-70 (props), 98 (secret), 124 (corpse), 108+ (enemies)
+  — nothing in 90-99 — and all three pixel-diff scenes have 90-99 cells
+  in the final view while rendering identical. Closes the P2
+  "unresolved" note.
+
+Bugs found + fixed in the app during the acceptance pass (the reference
+engine is the authority throughout):
+1. Sprite relative coords used the POST-tick player pose. Reference
+   order: Thing.update() computes rx/ry from the PRE-tick player, then
+   player.update() moves. Frame gained sp_* pre-tick pose fields; sprite
+   math uses them (orientable facing still uses the live player). B:
+   2863 px -> 1 px.
+2. Wall prefill bands: the reference fills ceiling rows [0, ~~(100-h)]
+   and floor rows [199-~~(100-h), 199] (JS truncation), then the wall
+   DDA overwrites its own rows. Our floor(top+2h) boundary was off by
+   one row near-integer top. (Scene B's last pixel.)
+3. tx=1.0 degenerate: the reference indexes wall-chunk column 64 ->
+   column 0 of the NEXT texture, clamped at 105. Replicated in walls.comp.
+   (Scene A's 80 residual px at column 0.)
+4. Sprite block offset evaluation order: the reference computes
+   x0 + ~~(c * height / 64) — multiply before divide. SpriteRecord now
+   carries th (per-sprite height); sprites.comp uses floor(c*th/64.0).
+5. EW-door side-wall step in the CPU DDA: rfy -= dt*dx must be
+   rfy -= dt*dy (dt = rfx/dx, the x-crossing). Scene C's 63 px: t values
+   matched to full precision and only tx was wrong.
+6. VSWAP sprite decode rewritten for the true format: 32-bit offset
+   table, per-sprite (firstCol,lastCol) headers, per-column offset
+   sub-table, 6-byte RLE records (endRow, poolOff, startRow) over a
+   shared pixel pool. The old contiguous-chunk decode happened to
+   produce acceptable sprites for scenes A/B; output identical before/
+   after for those scenes.
+7. SOD weapon sprite: SOD repacks VSWAP sprites with a -15 offset
+   (pistol frames 406-410 == base 421-425, byte-identical). build_frame
+   takes weapon_shift = -15 in --sod mode.
+8. main.cpp: '#' comment lines in scripts, --pose debug flag, pre-tick
+   pose capture before sim.tick().
+
+Verification pitfall (cost a cycle): the cross-checking Python
+transcription of the reference DDA had been copied from OUR code and
+therefore carried bug 5 with it — t values matched while tx diverged,
+which read as "the reference deviates". Transcribe cross-checkers from
+the reference source, never from the code under test.
+
+Tests: 173 (w3d_tests) + 386 (w3d_sim_tests) green post-acceptance.
 
 ## M5 (2026-11-13, DONE)
 Live input + render loop (commits 83022d7 + 0765cfe): SDL3 keyboard

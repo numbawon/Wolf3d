@@ -147,7 +147,7 @@ constexpr uint64_t kWallsFogOff = kColumnsOff + 320u * 32;      // 10240
 constexpr uint64_t kRowDistOff = kWallsFogOff + 16;             // 10256
 constexpr uint64_t kWloOff = kRowDistOff + 320u * 8;            // 12816
 constexpr uint64_t kWhiOff = kWloOff + 320u * 4;                // 14096
-constexpr uint64_t kSpritesFogOff = kSpritesOff + 256u * 40;    // 26624
+constexpr uint64_t kSpritesFogOff = kSpritesOff + 256u * 48;    // 28672
 constexpr uint64_t kFrameBufSize = 34064;
 
 // CPU-side record layouts (must match the GLSL struct layouts exactly).
@@ -157,7 +157,7 @@ struct ColumnUpload {
     std::uint32_t pad;
 };
 struct SpriteUpload {
-    double x0, y0, s, dist;
+    double x0, y0, s, dist, th;
     std::uint32_t scale;
     std::uint32_t sprite;
 };
@@ -172,8 +172,8 @@ struct FogUpload {
 };
 static_assert(sizeof(ColumnUpload) == 32);
 static_assert(offsetof(ColumnUpload, tex) == 24);
-static_assert(sizeof(SpriteUpload) == 40);
-static_assert(offsetof(SpriteUpload, scale) == 32);
+static_assert(sizeof(SpriteUpload) == 48);
+static_assert(offsetof(SpriteUpload, scale) == 40);
 static_assert(sizeof(FogUpload) == 16);
 static_assert(offsetof(FogUpload, on) == 8);
 
@@ -394,7 +394,7 @@ Renderer::Renderer(Window& window, VkInstance instance)
         binfo[3].range = 1024;
         binfo[4].buffer = frame_buf_;      // sprite records
         binfo[4].offset = kSpritesOff;
-        binfo[4].range = 256u * 40 + 16;   // + trailing fog doubles
+        binfo[4].range = 256u * 48 + 16;   // + trailing fog doubles
         binfo[5].buffer = frame_buf_;      // count
         binfo[5].offset = kCountOff;
         binfo[5].range = 4;
@@ -637,13 +637,28 @@ void Renderer::render_frame(const Frame& f,
         std::memcpy(base + kColumnsOff + static_cast<uint64_t>(i) * 32, &c,
                     sizeof(c));
         // M4 fog inputs (CPU side — see the offset notes): the wall union
-        // bounds for this column. Same formulas the shader's DDA uses
-        // (top = 100 - h, fbot = floor(top + 2h)).
+        // bounds for this column. The reference writes rows
+        // [max(0, ~~(100-h)), yi_final) where yi_final comes from the same
+        // 64-step yf accumulation the shader runs (NOT floor(100-h+2h),
+        // which is off by one row when 100-h is near an integer).
         const double top = 100.0 - f.columns[i].h;
-        const double fbot = std::floor(top + 2.0 * f.columns[i].h);
-        const double tf = std::floor(top);
-        const int wlo = (tf < 0.0) ? 0 : (tf > 200.0 ? 200 : static_cast<int>(tf));
-        const int whi = (fbot > 200.0) ? 200 : (fbot < 0.0 ? 0 : static_cast<int>(fbot));
+        const double ytrunc = (top >= 0.0) ? std::floor(top) : std::ceil(top);
+        const double s = f.columns[i].h / 32.0;
+        const double stepi = std::floor(s);
+        double yf = top - ytrunc;
+        int yi = static_cast<int>(ytrunc);
+        for (int j = 0; j < 64; ++j) {
+            yf += s - stepi;
+            int n = static_cast<int>(stepi);
+            if (yf >= 1.0) {
+                ++n;
+                yf -= 1.0;
+            }
+            yi += n;
+        }
+        const int wlo = (ytrunc < 0.0) ? 0 : (ytrunc > 200.0 ? 200
+                                                             : static_cast<int>(ytrunc));
+        const int whi = (yi > 200) ? 200 : (yi < 0 ? 0 : yi);
         const uint64_t ii = static_cast<uint64_t>(i);
         std::memcpy(base + kWloOff + ii * 4, &wlo, 4);
         std::memcpy(base + kWhiOff + ii * 4, &whi, 4);
@@ -671,8 +686,8 @@ void Renderer::render_frame(const Frame& f,
     for (uint32_t i = 0; i < kMaxSprites && i < static_cast<uint32_t>(f.sprite_count);
          ++i) {
         const auto& s = f.sprites[i];
-        SpriteUpload up{s.x0, s.y0, s.s, s.dist, s.scale, s.sprite};
-        std::memcpy(base + kSpritesOff + static_cast<uint64_t>(i) * 40, &up,
+        SpriteUpload up{s.x0, s.y0, s.s, s.dist, s.th, s.scale, s.sprite};
+        std::memcpy(base + kSpritesOff + static_cast<uint64_t>(i) * 48, &up,
                     sizeof(up));
     }
     std::memcpy(base + kPaletteOff, palette.data(), 256 * 4);
