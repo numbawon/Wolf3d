@@ -114,7 +114,7 @@ docs/        plan, format write-ups
    ACCEPT: screenshot comparison against the GOG/Steam modern port (reference
    only) scenes is visually faithful. The deliverable is the standalone
    native binary; it never runs under DOSBox.
-   **DONE (2026-11-14)** — pixel-perfect against the reference JS engine on
+   **DONE (2026-11-14, aaf66fb)** — pixel-perfect against the reference JS engine on
    all three pixel-diff acceptance scenes (0/64000 each, --no-fog: Wolf1
    Map2 idle, Wolf4 Map4 walk, SOD Tunnels 2 door); plane1 90-99 confirmed
    inert (cells in view, identical output); fog verified visually on 4
