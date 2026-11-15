@@ -36,6 +36,7 @@ add_library(w3d_data STATIC
     src/w3d/carmack.cpp
     src/w3d/maps.cpp
     src/w3d/vswap.cpp
+    src/w3d/vga.cpp
     src/w3d/audio.cpp
     src/w3d/opl2.cpp
     src/w3d/imf.cpp)
