@@ -122,6 +122,16 @@ docs/        plan, format write-ups
 4. `phase-4-audio` — mixer, SFX, music.
    ACCEPT: audible, correctly positioned; resampling hook demonstrated with
    a 16-bit/44.1k drop-in.
+   **DONE (2026-11-14, 67ca4a2)** — full subsystem against the real game
+   data: from-scratch YM3812 (OPL2) cross-validated sample-for-sample
+   against the uWolf clean-room reference (max diff 0.0 over 20,000 samples
+   of CORNER); IMF sequencer (700 Hz, loop); FM effects (140 Hz note
+   stream, voice 0); AudioBank classifies 86 PCM + 87 FM + 27 music (base)
+   / 80 + 81 + 24 (SOD). Mixer: resampling (any rate/width -> float32
+   stereo), cosine pan law, distance attenuation. Resampling hook proven
+   with a 16-bit/44.1k drop-in (439.5 Hz measured -> 48 kHz). Positional
+   panning verified left/centre/right. 100 audio checks green (173 format +
+   386 sim unchanged). WAV evidence via tools/w3d_audio_dump.
 5. `phase-5-ui-hud` — HUD, menus, messages, high scores, input (kb + gamepad).
    ACCEPT: full play loop of one episode start→death→restart.
 6. `phase-6-polish` — widescreen, config, save games, hi-res asset pipeline
