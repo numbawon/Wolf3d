@@ -330,14 +330,19 @@ Each node is `[bit0 u16, bit1 u16]` (little-endian). A node value of
 ### VGAGRAPH
 
 Concatenated chunks. Every chunk starts with `[u32 expanded_size]`
-followed by a **Huffman bitstream** decoded with VGADICT. Two exceptions:
+followed by a **Huffman bitstream** decoded with VGADICT. One exception:
 
-1. The 72×8×8 TILE8 chunk (chunk 135 in .WL6) has NO u32 prefix; its
-   expanded size is implicit (64 B × 72 = 4608 B).
-2. The 13 extern screen chunks (136..148: ORDERSCREEN, ERRORSCREEN,
-   T_HELPART, T_DEMO0..3, T_ENDART1..6) decompress directly onto a
-   320×200 4-bit plane buffer (the "screen hack"); expanded size =
-   320×200 bytes (64000… in practice the u32 is present — 320×200).
+1. The TILE8 chunk (chunk 135 in .WL6, chunk 150 in .SOD) has NO u32
+   prefix; its expanded size is implicit. The original id code expects
+   64 B × 72 tiles = 4608 B, but the **GOG files (both games) carry only
+   2240 B** (35 × 64 B tiles) — decode greedily to the end of the
+   region. Each tile is 8×8, 1 byte per pixel (8-bit index).
+2. The 13 extern screen chunks (base 136..148) / 18 (SOD 151..168:
+   ORDERSCREEN, ERRORSCREEN, T_HELPART, T_DEMO0..3, T_ENDART1..6,
+   + 5 SOD-only) DO have the u32; the original decompresses them
+   directly onto the 320×200 deplaned screen. The GOG files hold
+   different, smaller content (u32 = 4008..656 base; 768..6812 SOD) —
+   treat as opaque.
 
 Huffman decoder (bits read **LSB-first** within each byte):
 
@@ -352,14 +357,18 @@ repeat expanded_size times:
 
 ### Chunk map (.WL6; .SOD has a superset — see GFXV_SOD.H)
 
-| Chunks | Content |
+| Chunks (.WL6 / .SOD) | Content |
 |--------|---------|
-| 0      | STRUCTPIC: 528 B expanded = **132 × (w u16, h u16)** picture table; `pictable[i]` describes chunk `i+3`. |
+| 0      | STRUCTPIC: 528 B expanded (base) = **132 × (w u16, h u16)** picture table; `pictable[i]` describes pic chunk `i+3`. SOD: 588 B = 147 entries. |
 | 1      | STARTFONT: small proportional font, glyph height 10 (see below) |
 | 2      | big font (menu/options), glyph height 13 (same structure) |
-| 3..134 | 132 pics: H_BJPIC, H_CASTLEPIC, …, L_GUYPIC (43), …, STATUSBARPIC (86), TITLEPIC (87), …, FACE1A..FACE8A (109..130), …, GETPSYCHEDPIC (134) |
-| 135    | all 72 TILE8s (8×8 4-bit, 64 B each) in one chunk |
-| 136..148 | extern screens (see above) |
+| 3..134 / 3..149 | pics: H_BJPIC (3), …, L_GUYPIC (43), …, STATUSBARPIC (86), TITLEPIC (87), …, FACE1A..FACE8A (109..130), GOTGATLINGPIC (131), MUTANTBJPIC (132), GETPSYCHEDPIC (134); SOD adds BJWAITING/GODMODE faces etc. |
+| 135 / 150 | TILE8 chunk (see above; GOG: 2240 B = 35 × 8×8 tiles) |
+| 136..148 / 151..168 | extern screens (see above) |
+
+Note: for every pic, `expanded_size == w·h` exactly (w always a
+multiple of 4) — the plane-packed 4-bit layout occupies the same byte
+count as w·h 8-bit pixels.
 
 ### Font chunk
 
@@ -403,10 +412,12 @@ the palette above.
 
 ### In-game status bar (draw order, latch coords ×8 px)
 
-The bottom bar is built from latched pics: STATUSBARPIC background
-(304×24) first, then `StatusDrawPic(x, y, pic)` draws at pixel
-`(8x, 176+y)` (y measured from the top of the 24-px status area).
-All values confirmed against the id source (WL_AGENT.C):
+The bottom bar occupies the bottom **STATUSLINES = 40** rows (pixel
+rows 160..199; the 3D view is rows 0..159). It is built from latched
+pics: STATUSBARPIC background (**320×40**) at pixel y = 160 first, then
+`StatusDrawPic(x, y, pic)` draws at pixel `(8x, 160+y)` (y measured
+from the top of the status area).
+All values confirmed against the id source (WL_AGENT.C, WL_DEF.H):
 
 - level:   `LatchNumber(2,16,2, mapon+1)`  — 2-digit, right-justified
 - score:   `LatchNumber(6,16,6, score)`    — 6-digit, right-justified
