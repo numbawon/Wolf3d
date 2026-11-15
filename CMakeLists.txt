@@ -36,7 +36,9 @@ add_library(w3d_data STATIC
     src/w3d/carmack.cpp
     src/w3d/maps.cpp
     src/w3d/vswap.cpp
-    src/w3d/audio.cpp)
+    src/w3d/audio.cpp
+    src/w3d/opl2.cpp
+    src/w3d/imf.cpp)
 target_include_directories(w3d_data PUBLIC src)
 target_compile_features(w3d_data PUBLIC cxx_std_23)
 if(MSVC)
@@ -55,6 +57,18 @@ target_link_libraries(w3d_game PUBLIC w3d_data)
 target_include_directories(w3d_game PUBLIC src)
 if(MSVC)
   target_compile_options(w3d_game PRIVATE /W4 /permissive- /utf-8)
+endif()
+
+# Phase 4: audio (OPL2 synth + IMF sequencer + resampling/positional mixer).
+# The mixer is pure C++ (no device dependency) so it is fully testable.
+add_library(w3d_audio STATIC
+    src/audio/mixer.cpp)
+target_link_libraries(w3d_audio PUBLIC w3d_data)
+target_include_directories(w3d_audio PUBLIC src)
+if(MSVC)
+  target_compile_options(w3d_audio PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(w3d_audio PRIVATE -Wall -Wextra)
 endif()
 
 if(W3D_BUILD_TESTS)
@@ -76,6 +90,28 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_sim_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME sim COMMAND w3d_sim_tests)
+
+  add_executable(w3d_audio_tests tests/test_audio.cpp)
+  target_link_libraries(w3d_audio_tests PRIVATE w3d_audio)
+  target_compile_definitions(w3d_audio_tests PRIVATE
+      W3D_GAME_DIR_DEFAULT="${W3D_GAME_DIR}")
+  if(MSVC)
+    target_compile_options(w3d_audio_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME audio COMMAND w3d_audio_tests)
+endif()
+
+# Phase 4: audio evidence tool — renders the game's music / FM effects / a
+# PCM SFX to WAV files at the target rate. Doubles as the demonstration that
+# the resampling stage accepts any input rate/width (see --pcm44k).
+add_executable(w3d_tool_audio_dump tools/w3d_audio_dump.cpp)
+target_link_libraries(w3d_tool_audio_dump PRIVATE w3d_audio)
+target_compile_definitions(w3d_tool_audio_dump PRIVATE
+    W3D_GAME_DIR_DEFAULT="${W3D_GAME_DIR}")
+if(MSVC)
+  target_compile_options(w3d_tool_audio_dump PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(w3d_tool_audio_dump PRIVATE -Wall -Wextra)
 endif()
 
 # Phase 3: renderer.

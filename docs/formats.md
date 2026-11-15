@@ -29,7 +29,7 @@ they appear in, unless stated otherwise.
 | MAPHEAD.WL6 | 402          | index of GAMEMAPS header records                     |
 | VSWAP.WL6   | 1544376      | walls + sprites + sounds (663 chunks)                |
 | AUDIOHED.WL6| 1156         | index of AUDIOT chunks (289 × u32)                   |
-| AUDIOT.WL6  | 320209       | 86 SFX (PCM) + OPL FM music section                  |
+| AUDIOT.WL6  | 320209       | 86 PCM SFX + 87 FM effects + 27 OPL music tracks   |
 
 The m1/ (Spear of Destiny) set mirrors this: GAMEMAPS.SOD (21 maps),
 VSWAP.SOD, AUDIOHED.SOD, AUDIOT.SOD, VGAGRAPH.SOD (947979), VGAHEAD.SOD (510),
@@ -148,24 +148,163 @@ i.e. **red is the low byte** (the JS array is 0xAABBGGRR when read as a
 little-endian word). Entry 0 = 0xff000000 = black; entries 1..15 are the
 classic VGA dark colors. Verified pixel-exact against the reference render.
 
-## AUDIOHED / AUDIOT
+## AUDIOHED / AUDIOT (Phase 4 — fully cracked)
 
 ```
-AUDIOHED: 289 × u32 offsets into AUDIOT (offsets[0] = 0; monotonically
-          increasing; the last entry marks the end of the SFX region)
+AUDIOHED: 289 × u32 offsets into AUDIOT (base) / 268 × u32 (SOD).
+          offsets[0] = 0; strictly non-decreasing; the LAST entry is the
+          total size of AUDIOT (an EOF sentinel, not a chunk). The 288 (base)
+          / 267 (SOD) real chunks are laid out in four regions.
 ```
 
-SFX chunk (entries 0..85, i.e. 86 SFX):
+**Chunk regions** (base shown; SOD in parens):
+
+| Region    | base entries | SOD entries | Content                                  |
+|-----------|--------------|-------------|------------------------------------------|
+| PCM SFX   | 0..85 (86)   | 0..79 (80)  | digitized 8-bit mono sound effects       |
+| unknown   | 86 (1)       | 80 (1)      | a value table (see below); skipped       |
+| FM effects| 87..173 (87) | 81..161 (81)| OPL2 FM sound effects (pickup/door/etc.) |
+| empty     | 174..260     | 162..257    | length 0; offset → the `!ID!` marker     |
+| music     | 261..287 (27)| 258..266+   | OPL2 music tracks (27 base / 24 SOD)     |
+| EOF       | 288          | 267         | = file size                              |
+
+The regions are identified **by chunk shape**, not by trusting the table
+indices: the GOG files re-arranged the original DOS layout (the original had
+PC-speaker / FM / digitised tables of 87 each), so the empty region and the
+table do not reliably bound the music. The robust way to reach the music is
+to walk it in the raw file (below).
+
+### PCM SFX chunk
 
 ```
 [u32 nsamples][u16 volume 0..100][nsamples × u8 8-bit PCM][u8 flag = 0]
 ```
 
-Chunk length == 6 + nsamples + 1 for all 86. PCM is unsigned 8-bit, mono,
-low rate (8 samples up to a few thousand; first chunk: 8 samples, volume 1).
-After entry 85 the offsets point into an OPL FM music section (~310 KB) with
-a different structure (ASCII tags "NOTBIG", "ID!" observed) — not yet
-documented; Phase 4.
+Chunk length == 6 + nsamples + 1 for every PCM entry. PCM is unsigned 8-bit
+mono. `volume` is a discrete 0..100 ladder (observed set: 1,10,20,30,40,45,
+49,50,60,70,80,85,87,90,99) — it is the *base gain* of the effect, not a
+master rate. 86 in base, 80 in SOD.
+
+Sample rate is **assumed 11025 Hz** (the value the VSWAP/PLAYPAL-era
+digitised SFX are documented at; no clean-room reference decodes the PCM —
+uWolf is OPL-only — so this is not independently confirmed). These SFX are
+short by design: the longest is 306 samples (~28 ms at 11025 Hz), the median
+69. The *long* Wolf3D sound effects (gunshots, doors, monster cries) are the
+FM effects below, not the digitised ones.
+
+### Unknown table chunk (one per file)
+
+Base [86] / SOD [80]: `[u32 table_len][u16 0x32][table_len × u8]["00 !ID!"]`.
+The bytes are a table of ramping values (e.g. SOD: `81 80 80 7f 7f 7e …`
+then `6e 6f 70 71 …`); both end with `00 21 49 44 21` (`\0!ID!`). Purpose
+unknown; it is neither a PCM SFX (length ≠ 6+ns+1) nor an FM effect (the
+note data would overrun the chunk). The parser skips it.
+
+### FM effect chunk
+
+```
+[u32 note_len][u16 priority 0..100][16 × u8 instrument][u8 block]
+[note_len × u8 notes][name trailer: NUL-terminated ascii + padding]
+```
+
+- `instrument` (bytes 6..21), the first 10 used:
+  `mChar cChar mScale cScale mAttack cAttack mSus cSus mWave cWave`
+  (byte 15..21 = nConn + reserved). `m*` = modulator operator, `c*` =
+  carrier operator.
+- `block` (byte 22) = the note octave (0..7).
+- `notes`: one byte per 140 Hz tick; the byte is the FNUM-low (0..127);
+  a `0` byte means **key-off** for that tick.
+- `name`: original SFX instrument tag (`HUMAN1`, `TUBA1`, `BASS`, `SHOT2`,
+  `BANJO1`, `WOOD1`, `STRING2`, `BELLS2`, `MEOW1A`, `WHISTLE`, `CLICK`,
+  `BAGPIPE2`, `ELGUIT5`, `POPBASS1`, `SDRSYN02`, `DRMLOG01`, `WUZZLE3B`,
+  `ECHOBASS`, `WEIRD1/1A/1B`, `PIG1`, `QBERT1B`, `BASSDRN2`, `HUMAN3`,
+  `METAL1`, `BASSGTR`, `CRUNCHY1`, `GTRELC01`, `PINNOR07`, …).
+
+Playback (matches the original): program the instrument onto **channel 0**
+(modulator = operator offset 0, carrier = operator offset 3), set feedback/
+connect register `0xC0 = 0`, then step the note stream one byte per 140 Hz
+tick — a non-zero note writes `0xA0 = note` (FNUM-low) and `0xB0 =
+((block & 7) << 2) | 0x20` (key-on + octave); a zero note writes `0xB0 = 0`
+(key-off). The effect borrows voice 0 of the music chip exactly as the
+original did.
+
+### Music track chunk (IMF / WLF)
+
+The 27 base / 24 SOD tracks are a **contiguous region** in AUDIOT, located
+by the first `!ID!!ID!` (8 bytes) marker (base: offset 22951; SOD: 17592).
+Right after the marker, each track is:
+
+```
+[u16 dlen][dlen × (u8 reg, u8 val, u16 delay) — 4-byte IMF units]
+[88-byte tag]
+```
+
+- `dlen` is the byte length of the IMF data (NOT including the 2 length
+  bytes). The 88-byte tag (a Muse artefact the engine never reads) begins
+  `[u8 1][u8 0][16 title][64 remarks][6 prog]`; the 16-byte title carries the
+  song name (`CORNER`, `DUNGEON`, `WARMARCH`, `GETTHEM`, `HEADACHE`,
+  `HITLWLTZ`, `INTROCW3`, `NAZI_NOR`, `NAZI_OMI`, `POW`, `SALUTE`,
+  `SEARCHN`, `SUSPENSE`, `VICTORS`, `WONDERIN`, `FUNKYOU`, `ENDLEVEL`,
+  `GOINGAFT`, `PREGNANT`, `ULTIMATE`, `NAZI_RAP`, `ZEROHOUR`, `TWELFTH`,
+  `ROSTER`, `URAHERO`, `VICMARCH`, `PACMAN`; SOD adds the `X`-prefixed
+  tracks `XFUNKIE`, `XDEATH`, `XTIPTOE`, `XTHEEND`, `XEVIL`, `XJAZNAZI`,
+  `XAWARD`, `XPUTIT`, `XGETYOU`, `XTOWER2`, …).
+- Walking `[2 + dlen + 88]` from the marker reaches EOF **exactly** in both
+  files (base gap 0, SOD gap 0) — the definitive structural proof.
+- IMF timing: the `delay` field is in ticks of a **700 Hz** clock
+  (Wolf3D's AdLib clock). A track loops (the original never stops a floor's
+  music).
+
+### OPL2 (YM3812) register map — Wolf3D's packed encoding
+
+The register byte in each IMF unit is NOT the stock Yamaha address. Wolf3D
+packs both operators of each channel into the low nibble via:
+
+```
+i     = reg - page          (page ∈ {0x20,0x30,0x40,0x50,0x60,0x70,
+                               0x80,0x90,0xE0,0xF0})
+ch    = (i / 8) * 3 + (i % 8) % 3        // 0..8
+op    = (i % 8) / 3                       // 0 = modulator, 1 = carrier
+```
+
+(offsets 0,1,2 = ch0-2; 8,9,10 = ch3-5; 16,17,18 = ch6-8; the `op` bit
+selects modulator vs carrier within each channel group).
+
+Register pages (val semantics, YM3812):
+
+| Address   | Meaning                                                    |
+|-----------|------------------------------------------------------------|
+| 0x01      | global: bit 5 = wave-shaping (non-sine) enable             |
+| 0xBD      | global: bit 7 = tremolo depth, bit 6 = vibrato depth       |
+| 0x20/0x30 | per-op: bit 7 AM, bit 6 vibrato, bit 5 keyscale-enable,   |
+|           |         bit 4 KSR, bits 3-0 = multiplier (1,2,4,6,8,10,12, |
+|           |         14,16,18,20,20,24,24,30,30)                        |
+| 0x40/0x50 | per-op: bits 6-5 = key-scale level (KSL), bits 5-0 = total |
+|           |         level (TL)                                         |
+| 0x60/0x70 | per-op: bits 7-4 = attack rate (AR), bits 3-0 = decay (DR)|
+| 0x80/0x90 | per-op: bits 7-4 = sustain level (SL), bits 3-0 = release |
+| 0xE0/0xF0 | per-op: bits 1-0 = waveform select (0 sine,1,2,3)         |
+| 0xA0..0xA8| per-ch: FNUM low 8 bits                                    |
+| 0xB0..0xB8| per-ch: bits 1-0 FNUM high, bits 4-2 block (octave), bit 5 |
+|           |         key-on                                             |
+| 0xC0..0xC8| per-ch: bits 3-1 = feedback, bit 0 = connect (0=FM,1=add) |
+
+`0x00`/`0x08` (and the other per-channel-mode addresses) are written by the
+tracks' init sequences but carry no state the chip model needs; writes to
+unmapped addresses are ignored.
+
+This map was recovered two independent ways and they agree: the register
+decoding of a public IMF→MIDI converter, and the raw register histogram of
+every track (119 distinct addresses, all resolved by the table above).
+The synthesiser is a from-scratch YM3812 model (log-domain envelope
+generator, quarter-sine + exp2 tables, 49716 Hz native rate).
+
+**Cross-validation:** the C++ `Opl2` reproduces the clean-room reference
+(uWolf's `opl2.js`, same log-domain model) **sample-for-sample** (max
+diff 0.0 over 20,000 native-rate samples of the `CORNER` track, identical
+peak/RMS). The IMF sequencer (700 Hz tick, non-zero delay consumes the tick,
+loop on end) and the FM effect note clock (140 Hz, zero = key-off) follow the
+same reference.
 
 ## VGADICT
 
@@ -257,8 +396,9 @@ these deliberate differences, each pinned by a golden test in
 ## Open items (do NOT block the renderer)
 
 1. VGAGRAPH/VGAHEAD exact layout (Phase 5 — HUD & menus).
-2. OPL FM music section structure (Phase 4 — music; SFX is fully solved).
-3. Meaning of VGADICT table (Phase 5, if 4-bit tiles ever needed).
-4. The 3 mystery bytes after the GAMEMAPS magic.
-5. Plane 1 values 90..97/99 (inert in the sim; see "Map plane value
+2. Meaning of VGADICT table (Phase 5, if 4-bit tiles ever needed).
+3. The 3 mystery bytes after the GAMEMAPS magic.
+4. Plane 1 values 90..97/99 (inert in the sim; see "Map plane value
    semantics" — check rendering in Phase 3).
+5. PCM SFX sample rate (assumed 11025 Hz; unconfirmed — no clean-room
+   reference decodes the digitised SFX).
