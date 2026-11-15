@@ -22,9 +22,9 @@ they appear in, unless stated otherwise.
 | File        | Size (base/) | Purpose                                              |
 |-------------|--------------|------------------------------------------------------|
 | CONFIG.WL6  | 522          | config/version blob ("id software-'92" + zeros)      |
-| VGADICT.WL6 | 1024         | 512 × u16 lookup table (see below)                   |
-| VGAGRAPH.WL6| 275774       | HUD/menu graphics (structure not fully cracked yet)  |
-| VGAHEAD.WL6 | 450          | index table describing VGAGRAPH                      |
+| VGADICT.WL6 | 1024         | Huffman dictionary for VGAGRAPH (see below)          |
+| VGAGRAPH.WL6| 275774       | HUD/menu graphics, Huffman-compressed chunks         |
+| VGAHEAD.WL6 | 450          | 150 × u24 chunk offsets into VGAGRAPH                |
 | GAMEMAPS.WL6| 150652       | map geometry (60 maps)                               |
 | MAPHEAD.WL6 | 402          | index of GAMEMAPS header records                     |
 | VSWAP.WL6   | 1544376      | walls + sprites + sounds (663 chunks)                |
@@ -308,23 +308,125 @@ same reference.
 
 ## VGADICT
 
-1024 bytes = 512 × u16. Values observed 0..~259 (high bits used are 9).
-Values 256..259 also appear as map-plane-1 markers. Semantics: a 16-bit
-lookup table (likely 4-bit-tile → 16-bit-color expansion pairs); not needed
-for VSWAP rendering. Deferred.
+1024 bytes = **255 Huffman nodes × 4 bytes + 4 zero padding bytes**.
+Each node is `[bit0 u16, bit1 u16]` (little-endian). A node value of
+`0..255` is a terminal (emit that byte); `256..511` points to node
+`value − 256`. The root is node **254**.
 
-## VGAGRAPH / VGAHEAD — partially decoded (Phase 5, HUD/menus)
+## VGAGRAPH / VGAHEAD — fully decoded (Phase 5, HUD/menus)
 
-- VGAGRAPH: `[u32 528][12 zero bytes][275770 high-entropy payload]`
-  (m1: 588 / 947975). Payload = 528×512 + 5434. Not Carmack/RLEW, no fixed
-  tile period, contains 0xFFFF. Raw interpretation is noise.
-- VGAHEAD: 450 bytes = 75 × (u16, u16, u16) (m1: 510 = 85 entries).
-  Third field is strictly monotonically increasing (1..1077 / 1..3703);
-  first two fields carry coordinate-like sub-bytes. Almost certainly the
-  index/descriptor table for the VGAGRAPH payload (analogous to
-  MAPHEAD/AUDIOHED).
-- Plan to finish: correlate VGAHEAD entries with payload regions, then
-  render candidate HUD tiles against screenshots of the original HUD.
+### VGAHEAD
+
+```
+(N+1) × u24  little-endian 3-byte byte offsets into VGAGRAPH
+```
+
+- base/.WL6: 150 entries (149 chunks + terminator); m1/.SOD: 170 (169 +
+  terminator). The LAST entry equals the VGAGRAPH file size (EOF sentinel).
+  `0xFFFFFF` marks a sparse (absent) chunk — a chunk's region then ends at
+  the next non-sparse offset.
+- Chunk i occupies `[offsets[i], offsets[next non-sparse ≥ i+1])`.
+
+### VGAGRAPH
+
+Concatenated chunks. Every chunk starts with `[u32 expanded_size]`
+followed by a **Huffman bitstream** decoded with VGADICT. Two exceptions:
+
+1. The 72×8×8 TILE8 chunk (chunk 135 in .WL6) has NO u32 prefix; its
+   expanded size is implicit (64 B × 72 = 4608 B).
+2. The 13 extern screen chunks (136..148: ORDERSCREEN, ERRORSCREEN,
+   T_HELPART, T_DEMO0..3, T_ENDART1..6) decompress directly onto a
+   320×200 4-bit plane buffer (the "screen hack"); expanded size =
+   320×200 bytes (64000… in practice the u32 is present — 320×200).
+
+Huffman decoder (bits read **LSB-first** within each byte):
+
+```
+node = 254
+repeat expanded_size times:
+    bit = next stream bit
+    child = nodes[node].bit0 if !bit else nodes[node].bit1
+    if child < 256:  emit child;  node = 254
+    else:            node = child - 256
+```
+
+### Chunk map (.WL6; .SOD has a superset — see GFXV_SOD.H)
+
+| Chunks | Content |
+|--------|---------|
+| 0      | STRUCTPIC: 528 B expanded = **132 × (w u16, h u16)** picture table; `pictable[i]` describes chunk `i+3`. |
+| 1      | STARTFONT: small proportional font, glyph height 10 (see below) |
+| 2      | big font (menu/options), glyph height 13 (same structure) |
+| 3..134 | 132 pics: H_BJPIC, H_CASTLEPIC, …, L_GUYPIC (43), …, STATUSBARPIC (86), TITLEPIC (87), …, FACE1A..FACE8A (109..130), …, GETPSYCHEDPIC (134) |
+| 135    | all 72 TILE8s (8×8 4-bit, 64 B each) in one chunk |
+| 136..148 | extern screens (see above) |
+
+### Font chunk
+
+```
+[u16 height]
+[256 × u16 location]   ; byte offset of glyph, RELATIVE TO CHUNK START
+[256 × u8 width]
+[glyph pixel pool: for each non-empty glyph, width × height bytes,
+ row stride = glyph width, byte != 0 = ink, 0 = transparent]
+```
+
+Verified: both fonts decode to clean, readable proportional glyphs
+(ASCII 32..126), 109 / 97 non-empty glyphs respectively.
+
+### Pic pixel layout — "deplaned" 4-bit, plane-major
+
+Pics are 16-color (4-bit) images stored **plane-major**: four blocks of
+`h × (w/4)` bytes. Byte `(plane p, row y, byte cx)` holds four pixels
+`(4·cx .. 4·cx+3, y)`; **bit k (LSB = leftmost pixel) is plane k**.
+
+```
+pixel (x, y) = (b0,b1,b2,b3) with b_p = bit (x & 3) of byte p·h·(w/4) + y·(w/4) + (x/4)
+color = gamepal_deplane[b0 + 16·b1 + 32·b2 + 64·b3]
+```
+
+`gamepal_deplane` is the original id 256-entry DAC palette — 256 ×
+(R,G,B) with 6-bit components (0..63; scale ×255/63 for 8-bit). It is the
+`gamepal[]` array of the id source (recovered from the public
+reference/original tree; NOT the VSWAP 8-bit texture palette in
+`gamepalette.inc` — that one is the reference engine's 3D-texture table).
+Entries [p·16 .. p·16+15] are plane p's 16 colors; a face uses e.g.
+indices {0,1,16,17,32,33,48,49,64,65,…} (black/blue/white/gray/red/dark
+red/pink-skin tones/light yellow/…).
+
+Verification (real .WL6 data): pictable decodes to 132/132 plausible
+dimensions (e.g. H_BJPIC 96×88, L_GUYPIC 104×88, in-game faces 24×32,
+TITLEPIC 320×200); both fonts render legible glyphs; H_BJPIC, L_GUYPIC,
+TITLEPIC, GETPSYCHEDPIC ("Get Psyched!" text), and the 24×32 status faces
+(all 22) render as recognizable pixel art — faces, icons, digits — with
+the palette above.
+
+### In-game status bar (draw order, latch coords ×8 px)
+
+The bottom bar is built from latched pics: STATUSBARPIC background
+(304×24) first, then `StatusDrawPic(x, y, pic)` draws at pixel
+`(8x, 176+y)` (y measured from the top of the 24-px status area).
+All values confirmed against the id source (WL_AGENT.C):
+
+- level:   `LatchNumber(2,16,2, mapon+1)`  — 2-digit, right-justified
+- score:   `LatchNumber(6,16,6, score)`    — 6-digit, right-justified
+- lives:   `LatchNumber(14,16,1, lives)`
+- health:  `LatchNumber(21,16,3, health)`  — 3-digit, right-justified
+- ammo:    `LatchNumber(27,16,2, ammo)`
+- face:    `(17,4)`, pic `FACE1APIC + 3·((100−health)/16) + faceframe`,
+  faceframe ∈ {0,1,2} (a rolled 3 becomes 1); health 0 → FACE8APIC
+  (dead face); special one-shots: BJOUCHPIC (SOD heavy-hit),
+  MUTANTBJPIC (died to a knife), GOTGATLINGPIC, BJWAITING1/2PIC,
+  god-mode face (SOD).
+- weapon:  `(32,8)`, pic `KNIFEPIC + weapon` (0..3 = knife/pistol/
+  machine gun/gatling)
+- keys:    gold `(30,4)` GOLDKEYPIC/NOKEYPIC; silver `(30,20)`
+  SILVERKEYPIC/NOKEYPIC
+
+`LatchNumber(x, y, width, n)` right-justifies the decimal string in
+`width` columns, padding the left with N_BLANKPIC; digits come from
+N_0PIC..N_9PIC (chunks 99..108, N_BLANKPIC = 98) — each is a 1×1
+latch unit (8×8 px).
 
 ## CONFIG
 
@@ -395,10 +497,8 @@ these deliberate differences, each pinned by a golden test in
 
 ## Open items (do NOT block the renderer)
 
-1. VGAGRAPH/VGAHEAD exact layout (Phase 5 — HUD & menus).
-2. Meaning of VGADICT table (Phase 5, if 4-bit tiles ever needed).
-3. The 3 mystery bytes after the GAMEMAPS magic.
-4. Plane 1 values 90..97/99 (inert in the sim; see "Map plane value
+1. The 3 mystery bytes after the GAMEMAPS magic.
+2. Plane 1 values 90..97/99 (inert in the sim; see "Map plane value
    semantics" — check rendering in Phase 3).
-5. PCM SFX sample rate (assumed 11025 Hz; unconfirmed — no clean-room
+3. PCM SFX sample rate (assumed 11025 Hz; unconfirmed — no clean-room
    reference decodes the digitised SFX).
