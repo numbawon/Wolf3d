@@ -7,7 +7,7 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
 - WS2 (scene skeleton + menus) DONE 13d1bc5 + audit a93a1e2 (2026-11-15) —
   src/app/scene.* + menu.* + font8x16, full-res menu pass (window-sized
   image, 1:1 blit, per Decision 1), w3d_scene_tests.
-- WS3 (windowing + internal resolution) DONE (2026-11-16) — res_scale
+- WS3 (windowing + internal resolution) DONE f508bdd (2026-11-16) — res_scale
   1..4 (--res-scale, clamped), 8:5 letterbox blit with linear/nearest/
   integer filters, F11 windowed->borderless->exclusive cycle (exclusive
   verified working on the N1X; latched degradation if a driver lacks it),
@@ -315,7 +315,7 @@ Rebind UI (Controls section of options, full-res modern):
    compute dispatch change, letterbox blit, blit filters, res_scale live
    rebuild, F11 fullscreen modes, resize-safe swapchain handling.
    BENCHMARK 4x on target hardware early (16x pixel count).
-   DONE (2026-11-16). Implementation summary:
+   DONE f508bdd (2026-11-16). Implementation summary:
    - frame.cpp/hpp: build_frame takes a scale (1..4, clamped; kMaxScale=4);
      W = 320*S columns, wall height 160*S, pixel space (320*S, 200*S).
      Even-column identity (S=2 col 2i == S=1 col i bit-exact) and sprite
