@@ -17,9 +17,9 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   Bench (N1X, scripted 4000 frames, last second): S=1 ~1600 fps,
   S=2 ~735, S=3 ~517, S=4 ~323 — 4x is ~5x the cost of 1x, sublinear in
   pixel count; all well above 60.
-- WS4 (config + options/pause scenes) DONE 2026-11-16 (this workstream's
-  commit) — src/app/config.* (pure C++ v1 JSON schema, strict parser +
-  tolerant mapping, deterministic writer, load/save, CLI overrides),
+- WS4 (config + options/pause scenes) DONE e4d981c (2026-11-16) —
+  src/app/config.* (pure C++ v1 JSON schema, strict parser + tolerant
+  mapping, deterministic writer, load/save, CLI overrides),
   Scene::Pause + Scene::Options (4 tabs; live-apply of video/sensitivity,
   stored-only audio + difficulty with PENDING markers), save-on-change +
   clean-exit save for interactive runs only. 7 suites green (2464 checks)
@@ -377,7 +377,8 @@ Rebind UI (Controls section of options, full-res modern):
      rebuild, since borderless resizes the window).
 4. Config: JSON writer/parser, load/save, live-apply hooks; options
    screen sections.
-   DONE 2026-11-16 (all kickoff decisions as confirmed; see notes below).
+   DONE e4d981c (2026-11-16; all kickoff decisions as confirmed; see notes
+   below).
    Implementation summary:
    - src/app/config.{hpp,cpp}: pure C++ (no SDL/Vulkan — headless
      testable). v1 schema (video/audio/controls/gameplay; key order
