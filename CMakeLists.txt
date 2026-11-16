@@ -120,6 +120,22 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_scene_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME scene COMMAND w3d_scene_tests)
+
+  add_executable(w3d_scale_tests tests/test_scale.cpp)
+  target_link_libraries(w3d_scale_tests PRIVATE w3d_render w3d_game)
+  if(MSVC)
+    target_compile_options(w3d_scale_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME scale COMMAND w3d_scale_tests)
+
+  # WS3: display-mode cycle (F11) against the real SDL3 + display; skips
+  # when headless.
+  add_executable(w3d_window_tests tests/test_window.cpp)
+  target_link_libraries(w3d_window_tests PRIVATE w3d_render)
+  if(MSVC)
+    target_compile_options(w3d_window_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME window COMMAND w3d_window_tests)
 endif()
 
 # Phase 4: audio evidence tool — renders the game's music / FM effects / a
@@ -213,7 +229,7 @@ if(W3D_BUILD_RENDER)
   # Game application (M3: simulation + raycast renderer).
   add_executable(w3d_app src/main.cpp)
   target_link_libraries(w3d_app PRIVATE w3d_render w3d_game w3d_appui)
-  w3d_add_shaders(w3d_app walls.comp sprites.comp menu.comp)
+  w3d_add_shaders(w3d_app walls1.comp walls2.comp sprites.comp menu.comp)
   if(MSVC)
     target_compile_options(w3d_app PRIVATE /W4 /permissive- /utf-8)
   endif()

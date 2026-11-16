@@ -67,6 +67,19 @@ using w3d::render::Flash;
 using w3d::render::Renderer;
 using w3d::render::Window;
 
+// WS3: F11 mode changes are logged to the console (user feedback).
+const char* fullscreen_mode_name(w3d::render::FullscreenMode m) {
+    switch (m) {
+        case w3d::render::FullscreenMode::Windowed:
+            return "windowed";
+        case w3d::render::FullscreenMode::Borderless:
+            return "borderless";
+        case w3d::render::FullscreenMode::Exclusive:
+            return "exclusive";
+    }
+    return "?";
+}
+
 struct Args {
     std::filesystem::path data_dir =
         std::filesystem::path("C:/Program Files (x86)/Steam/steamapps/common/") /
@@ -83,6 +96,11 @@ struct Args {
     // frame (hidden window, one frame) — test hooks for the menu pass.
     std::string scene_start;
     std::string menu_shot;
+    uint32_t res_scale = 1;  // internal render scale 1..4 (WS3)
+    std::string dump_atlas;  // WS3 debug: dump GPU buffers after the shot
+    std::string win_size;    // WS3: initial window "WxH" (default 640x400)
+    std::string blit_filter; // WS3: linear | nearest | integer (window blit)
+    std::string window_shot; // WS3: save the presented window (bars incl.)
 };
 
 Args parse_args(int argc, char** argv) {
@@ -110,12 +128,25 @@ Args parse_args(int argc, char** argv) {
             a.scene_start = argv[++i];
         } else if (std::strcmp(argv[i], "--menu-shot") == 0 && i + 1 < argc) {
             a.menu_shot = argv[++i];
+        } else if (std::strcmp(argv[i], "--res-scale") == 0 && i + 1 < argc) {
+            a.res_scale = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (std::strcmp(argv[i], "--dump-atlas") == 0 && i + 1 < argc) {
+            a.dump_atlas = argv[++i];
+        } else if (std::strcmp(argv[i], "--win") == 0 && i + 1 < argc) {
+            a.win_size = argv[++i];
+        } else if (std::strcmp(argv[i], "--blit-filter") == 0 && i + 1 < argc) {
+            a.blit_filter = argv[++i];
+        } else if (std::strcmp(argv[i], "--window-shot") == 0 && i + 1 < argc) {
+            a.window_shot = argv[++i];
         } else {
             std::fprintf(stderr,
                          "usage: w3d_app [--level N] [--sod] "
                          "[--data-dir PATH] [--script FILE] "
                          "[--screenshot PATH] [--frames N] [--one-frame] "
-                         "[--scene NAME] [--menu-shot PATH]\n");
+                         "[--scene NAME] [--menu-shot PATH] "
+                         "[--res-scale N] [--win WxH] "
+                         "[--blit-filter linear|nearest|integer] "
+                         "[--window-shot PATH] [--dump-atlas PREFIX]\n");
             std::abort();
         }
     }
@@ -123,11 +154,36 @@ Args parse_args(int argc, char** argv) {
         std::fprintf(stderr, "w3d: --one-frame requires --screenshot\n");
         std::abort();
     }
+    if (!a.blit_filter.empty() && a.blit_filter != "linear" &&
+        a.blit_filter != "nearest" && a.blit_filter != "integer") {
+        std::fprintf(stderr,
+                     "w3d: --blit-filter must be linear|nearest|integer\n");
+        std::abort();
+    }
     if (a.one_frame)
         a.frames = 1;
     if (!a.menu_shot.empty())
         a.frames = 1;
     return a;
+}
+
+// "960x400" -> (960, 400). Empty string -> (640, 400) default.
+void parse_win_size(const std::string& s, uint32_t& w, uint32_t& h) {
+    w = 640;
+    h = 400;
+    if (s.empty())
+        return;
+    const auto x = s.find('x');
+    if (x == std::string::npos) {
+        std::fprintf(stderr, "w3d: --win expects WxH, got '%s'\n", s.c_str());
+        std::abort();
+    }
+    w = static_cast<uint32_t>(std::stoul(s.substr(0, x)));
+    h = static_cast<uint32_t>(std::stoul(s.substr(x + 1)));
+    if (w < 1 || h < 1) {
+        std::fprintf(stderr, "w3d: --win dimensions must be >= 1\n");
+        std::abort();
+    }
 }
 
 // SDL3 3.4.x reports key names capitalized ("Up", "W"); the scene machine
@@ -309,8 +365,15 @@ int main(int argc, char** argv) {
         SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
         if (args.one_frame || !args.menu_shot.empty())
             flags |= SDL_WINDOW_HIDDEN;
-        Window window(640, 400, "wolf3d (phase 5)", instance, flags);
+        uint32_t win_w = 0, win_h = 0;
+        parse_win_size(args.win_size, win_w, win_h);
+        Window window(win_w, win_h, "wolf3d (phase 5)", instance, flags);
         Renderer renderer(window, instance);
+        renderer.set_res_scale(args.res_scale);
+        if (args.blit_filter == "nearest")
+            renderer.set_blit_filter(w3d::render::BlitFilter::Nearest);
+        else if (args.blit_filter == "integer")
+            renderer.set_blit_filter(w3d::render::BlitFilter::Integer);
 
         // Static atlases from the VSWAP banks.
         {
@@ -350,10 +413,19 @@ int main(int argc, char** argv) {
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_EVENT_QUIT) {
                     window_open = false;
-                } else if (!scripted && ev.type == SDL_EVENT_KEY_DOWN) {
-                    if (ev.key.key == SDLK_ESCAPE)
-                        window_open = false;
-                    live.on_key(SDL_GetKeyName(ev.key.key), true);
+                } else if (ev.type == SDL_EVENT_KEY_DOWN) {
+                    // F11: fullscreen cycle (WS3) — works in every mode.
+                    if (ev.key.key == SDLK_F11) {
+                        const auto m = window.cycle_fullscreen();
+                        std::fprintf(stderr, "w3d: display mode: %s\n",
+                                     fullscreen_mode_name(m));
+                        break;
+                    }
+                    if (!scripted) {
+                        if (ev.key.key == SDLK_ESCAPE)
+                            window_open = false;
+                        live.on_key(SDL_GetKeyName(ev.key.key), true);
+                    }
                 } else if (!scripted && ev.type == SDL_EVENT_KEY_UP) {
                     live.on_key(SDL_GetKeyName(ev.key.key), false);
                 } else if (!scripted && ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
@@ -385,7 +457,7 @@ int main(int argc, char** argv) {
             sim.tick(in);
             w3d::render::build_frame(frame, sim, pre_pose, prev_snap,
                                      prev_snap_count, prev_weapon_cooldown,
-                                     weapon_shift);
+                                     weapon_shift, args.res_scale);
             prev_weapon_cooldown = sim.weapon_cooldown();
             prev_snap = frame.actor_snap;
             prev_snap_count = frame.actor_snap_count;
@@ -395,19 +467,44 @@ int main(int argc, char** argv) {
             const bool do_shot = !args.screenshot.empty() &&
                                  args.frames != 0 &&
                                  frame_idx == args.frames - 1;
+            // WS3: capture the PRESENTED window (letterbox bars included).
+            const bool do_win_shot = !args.window_shot.empty() &&
+                                     args.frames != 0 &&
+                                     frame_idx == args.frames - 1;
             if (renderer.begin_frame()) {
-                renderer.render_frame(frame, palette, do_shot, !args.no_fog);
+                renderer.render_frame(frame, palette, do_shot, !args.no_fog,
+                                      do_win_shot);
                 renderer.present();
                 if (do_shot) {
                     std::vector<uint8_t> px;
+                    uint32_t iw = 0, ih = 0;
+                    renderer.internal_size(iw, ih);
                     if (renderer.readback(px) &&
-                        w3d::util::write_bmp(
-                            args.screenshot, w3d::render::kInternalW,
-                            w3d::render::kInternalH, px.data())) {
+                        w3d::util::write_bmp(args.screenshot, iw, ih,
+                                             px.data())) {
                         std::printf("w3d: saved %s\n",
                                     args.screenshot.c_str());
                     } else {
                         std::fprintf(stderr, "w3d: screenshot failed\n");
+                        rc = 1;
+                    }
+                    if (!args.dump_atlas.empty()) {
+                        renderer.dump_atlases(args.dump_atlas);
+                        std::printf("w3d: dumped GPU buffers %s.*\n",
+                                    args.dump_atlas.c_str());
+                    }
+                }
+                if (do_win_shot) {
+                    std::vector<uint8_t> wp;
+                    uint32_t sw = 0, sh = 0;
+                    renderer.swapchain_size(sw, sh);
+                    if (renderer.readback_window(wp) &&
+                        w3d::util::write_bmp(args.window_shot, sw, sh,
+                                             wp.data())) {
+                        std::printf("w3d: saved window %s\n",
+                                    args.window_shot.c_str());
+                    } else {
+                        std::fprintf(stderr, "w3d: window shot failed\n");
                         rc = 1;
                     }
                 }
@@ -466,6 +563,14 @@ int main(int argc, char** argv) {
                         ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                         window_open = false;
                     } else if (ev.type == SDL_EVENT_KEY_DOWN) {
+                        // F11: fullscreen cycle (WS3) — before routing to
+                        // the scene machine / live input.
+                        if (ev.key.key == SDLK_F11) {
+                            const auto m = window.cycle_fullscreen();
+                            std::fprintf(stderr, "w3d: display mode: %s\n",
+                                         fullscreen_mode_name(m));
+                            continue;
+                        }
                         const char* raw = SDL_GetKeyName(ev.key.key);
                         if (scene.scene() == w3d::app::Scene::Game) {
                             live.on_key(raw, true);
@@ -534,7 +639,7 @@ int main(int argc, char** argv) {
                         w3d::render::build_frame(
                             frame, *scene_sim, pre_pose, prev_snap,
                             prev_snap_count, prev_weapon_cooldown,
-                            weapon_shift);
+                            weapon_shift, args.res_scale);
                         prev_weapon_cooldown = scene_sim->weapon_cooldown();
                         prev_snap = frame.actor_snap;
                         prev_snap_count = frame.actor_snap_count;

@@ -1,0 +1,107 @@
+// w3d render/shaders/walls1.comp — wall pass 1 (WS3): per-column geometry.
+//
+// Dispatch (S, 1, 1) x local 320 = W = 320*S invocations, one per internal
+// column. Each invocation runs the reference drawWalls prefill (ceiling
+// palette 29 / floor palette 25) and the 64-texel vertical DDA exactly as
+// the old single-pass walls.comp did (S=1 bit-identical), but instead of
+// keeping a private `rows[H]` array — H uints per invocation, 3200 bytes at
+// S=4, too much local memory for 320 concurrent invocations on the N1X —
+// it writes each resolved row straight into the shared scratch SSBO.
+// walls2.comp (pass 2) reads scratch back, applies the M4 fog, and stores
+// into the image.
+//
+// Scratch layout (one u32 per internal pixel, column-major):
+//   scratch[x * H + row],  H = 200 * scale (scale from the count UBO).
+// Reserved at the S=4 capacity (1280 x 800 u32 = 4 MB).
+//
+// Driver facts carried over from walls.comp: byte extraction via % 256
+// (this ARM64 driver miscompiles `v & 0xFF`); the reference's ~~(64*tx)
+// column-64 overflow into the next texture chunk is replicated (see below).
+#version 460
+
+layout(local_size_x = 320) in;
+
+struct Col {
+    double t;
+    double h;
+    double tx;
+    uint tex;
+};
+// Columns SSBO, std430: 1280 x 32B records @0 (t@0, h@8, tx@16, tex@24).
+// Only the per-column record is read here; the fog tail belongs to
+// walls2.comp (same buffer region, different view).
+layout(set = 0, binding = 0) buffer Columns {
+    Col columns[1280];
+} cb;
+
+layout(set = 0, binding = 1) buffer WallAtlas { uint texel[]; };
+layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
+layout(set = 0, binding = 5) uniform Counts {
+    uint spriteCount;
+    uint scale;
+} counts;
+layout(set = 0, binding = 7) buffer Scratch { uint px[]; };
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    const uint H = 200u * counts.scale;
+    const double mid = 100.0 * double(counts.scale);  // H/2
+    Col c = cb.columns[x];
+    double h = c.h;                 // wall half-height in px (wallHeight/2t)
+    double top = mid - h;           // wall top edge (reference H/2 - h)
+    double s = h / 32.0;            // px per texel (reference h/32)
+    double stepi = floor(s);        // integer rows per texel
+    double stepf = s - stepi;       // fractional remainder
+    // Reference ~~(64 * tx): tx is [0,1] and can be exactly 1.0 (a ray
+    // that starts on a cell boundary, extreme screen columns). JS then
+    // indexes column 64 — i.e. column 0 of the NEXT texture (the 4096-byte
+    // offset arithmetic overflows into the next chunk). Replicate that;
+    // the clamp stops the read at the last tile of the base VSWAP bank
+    // (106 wall chunks; SOD reuses the same bank), which is where the
+    // reference's own read would run past the shipped data anyway.
+    uint texcol = uint(floor(64.0 * c.tx));
+    uint tidx = c.tex + (texcol > 63u ? 1u : 0u);
+    texcol = (texcol > 63u ? 0u : texcol);
+    if (tidx > 105u)
+        tidx = 105u;
+    // Wall atlas is row-major (row*64+col); the reference reads the 64
+    // texels of column texcol top to bottom.
+    uint base = tidx * 4096u + texcol;
+
+    // Reference prefill (drawWalls): ceiling rows j = 0..yi (j <= yi0) and
+    // floor rows pixelHeight-1-j, where yi0 = ~~(H/2 - h). The two bands
+    // OVERLAP the wall region and the wall DDA below overwrites its own
+    // union. Using floor(top + 2h) as the boundary here was off by one row
+    // when top is near an integer: the reference's floor starts at
+    // pixelHeight-1 - ~~(H/2-h), not at floor(H/2-h+2h).
+    double ytrunc = (top >= 0.0) ? floor(top) : ceil(top);  // JS ~~
+    const int yi0 = int(ytrunc);
+    const uint baseidx = x * H;
+    const int floor_from = int(H) - 1 - yi0;
+    for (uint row = 0u; row < H; ++row)
+        px[baseidx + row] = (int(row) <= yi0) ? color[29]
+                           : (int(row) >= floor_from) ? color[25]
+                           : 0u;  // wall region: the DDA below writes every row
+
+    // Reference 64-texel vertical DDA. yi/yf start at the wall's top edge
+    // (reference: yi = ~~(H/2 - h), yf = (H/2 - h) % 1). Rows are written
+    // into scratch as they resolve (out of order is fine: pass 2 only
+    // starts after this dispatch completes).
+    double yi = ytrunc;
+    double yf = top - ytrunc;
+    for (uint j = 0u; j < 64u; ++j) {
+        uint texv = texel[base + j * 64u] % 256u;
+        yf += stepf;
+        double n = stepi;
+        if (yf >= 1.0) {
+            n = stepi + 1.0;
+            yf -= 1.0;
+        }
+        for (double k = 0.0; k < n; ++k) {
+            double r = yi + k;
+            if (r >= 0.0 && r < double(H))
+                px[baseidx + uint(r)] = texv + 256u;
+        }
+        yi += n;
+    }
+}

@@ -7,7 +7,18 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
 - WS2 (scene skeleton + menus) DONE 13d1bc5 + audit a93a1e2 (2026-11-15) —
   src/app/scene.* + menu.* + font8x16, full-res menu pass (window-sized
   image, 1:1 blit, per Decision 1), w3d_scene_tests.
-- NEXT: WS3 — windowing + internal resolution (section 4.1 / workstream 3).
+- WS3 (windowing + internal resolution) DONE (2026-11-16) — res_scale
+  1..4 (--res-scale, clamped), 8:5 letterbox blit with linear/nearest/
+  integer filters, F11 windowed->borderless->exclusive cycle (exclusive
+  verified working on the N1X; latched degradation if a driver lacks it),
+  walls split into two compute passes (walls1/walls2), resize-safe
+  swapchain. S=1 stays 0/64000 in the pixel-diff harness; 6 suites green
+  (2224 checks) incl. new w3d_scale_tests (1314) + w3d_window_tests (7).
+  Bench (N1X, scripted 4000 frames, last second): S=1 ~1600 fps,
+  S=2 ~735, S=3 ~517, S=4 ~323 — 4x is ~5x the cost of 1x, sublinear in
+  pixel count; all well above 60.
+- NEXT: WS4 — config (JSON writer/parser, load/save, live-apply; options
+  screen sections).
 Decisions confirmed by user 2026-11-14: 1, 4, 5 as
 recommended; 2 REVISED (configurable internal resolution 1x-4x instead of
 320x200-strict); 3 REVISED (keyboard rebind UI in P5 + standard gamepad
@@ -131,13 +142,18 @@ Menus (modern full-res per Decision 1):
 - HUD/2D art: authored in 320x200 coordinates; the HUD layer multiplies
   by S (one constant). Tiles nearest-neighbor upscale by S — pixel-art
   look preserved at all scales.
-- Window: SDL_WINDOW_FULLSCREEN_DESKTOP for borderless; exclusive
-  SDL_WINDOW_FULLSCREEN only if it works cleanly on Windows ARM64, else
-  windowed + borderless only (risk, see 7). Aspect always 8:5, centered,
+- Window: borderless = SDL_SetWindowFullscreen(win, true) with a NULL
+  stored fullscreen mode; exclusive = SDL_SetWindowFullscreenMode(win,
+  mode) while already fullscreen (async; SyncWindow after). Note the
+  SDL3 trap verified on this platform: SDL_SetWindowFullscreenMode(win,
+  nullptr) alone is a silent no-op. Exclusive works on the N1X (verified);
+  if a driver lacks it the cycle degrades to windowed + borderless (a
+  latch, logged once — see workstream 3). Aspect always 8:5, centered,
   black bars. F11 cycles windowed -> borderless -> (exclusive) -> windowed.
 - HiDPI: treat SDL window size as logical pixels.
-- Performance: 4x internal = 16x the pixel count of 1x. Benchmark at
-  workstream 3; keep the option regardless, note the cost if it matters.
+- Performance: 4x internal = 16x the pixel count of 1x. Benchmarked at
+  workstream 3: ~5x the time of 1x on the N1X (~323 fps), sublinear in
+  pixel count — the option is kept, no cost caveat needed.
 
 ### 4.2 Audio device (Decision 5)
 - Add miniaudio (single header) to .build/deps; new target w3d_audio_dev
@@ -299,28 +315,55 @@ Rebind UI (Controls section of options, full-res modern):
    compute dispatch change, letterbox blit, blit filters, res_scale live
    rebuild, F11 fullscreen modes, resize-safe swapchain handling.
    BENCHMARK 4x on target hardware early (16x pixel count).
-   KICKOFF NOTES (WS3, for a fresh context window):
-   - Current state: the game pass renders a FIXED 320x200 (kInternalW/H)
-     R8G8B8A8 storage image and blits it VK_FILTER_LINEAR into the
-     640x400 swapchain (render_frame in src/render/renderer.cpp). The
-     menu pass (WS2) is already window-sized and 1:1 — leave it alone.
-   - Change: parameterize the game image to (320*S, 200*S), S in 1..4,
-     rebuild offscreen target on change (no window change); blit stage
-     gains a filter (linear/nearest/integer) + 8:5 letterbox (black
-     bars, centered); F11 cycles windowed -> borderless -> (exclusive if
-     it works on ARM64, else stop at borderless).
-   - INVARIANT: at S=1 the internal frame must stay pixel-identical to
-     the Phase 3/4 baseline — the --script/--one-frame screenshot
-     harness (scratch w3d_ref workflow) must keep diffing 0/64000; 1x is
-     also the acceptance default.
-   - Bench FIRST: 4x = 16x the pixel count of 1x on the RTX Spark N1X —
-     time a 4x internal render before building the whole options path.
-   - Known driver traps still apply (skill): UBO 256-byte alignment,
-     % 256u byte extraction, float imageStore, no bool UBO members;
-     the fog table and per-column tails are already resolution-agnostic
-     (pure per-pixel math).
-   - The window today is 8:5 by coincidence — WS3 makes it a rule
-     (resizable, letterboxed, HiDPI logical px).
+   DONE (2026-11-16). Implementation summary:
+   - frame.cpp/hpp: build_frame takes a scale (1..4, clamped; kMaxScale=4);
+     W = 320*S columns, wall height 160*S, pixel space (320*S, 200*S).
+     Even-column identity (S=2 col 2i == S=1 col i bit-exact) and sprite
+     scaling invariants pinned by tests/test_scale.cpp (w3d_scale_tests,
+     1314 checks) — this is why the S=1 pixel-diff baseline stays
+     meaningful at every scale.
+   - renderer.cpp/hpp: internal image sized (320*S, 200*S) RGBA8; GPU
+     buffer layout is scale-INDEPENDENT (variable regions reserved at
+     S=4 capacity at fixed 256-byte-aligned offsets — the ARM64 driver
+     clamps unaligned UBO offsets down). Walls dispatch = S workgroups of
+     320, split into two passes (shaders/walls1.comp + walls2.comp;
+     walls.comp deleted) to keep shared memory bounded at 4x. Blit stage:
+     8:5 letterbox (black bars via vkCmdClearAttachments + blit), centered,
+     filter selectable (linear default / nearest / integer = nearest at
+     integer window scale only). Resize recreates the swapchain + staging.
+   - window.cpp/hpp: FullscreenMode {Windowed, Borderless, Exclusive};
+     F11 = cycle_fullscreen(). VERIFIED SDL3 semantics on this platform
+     (probe: scratch w3d_ref/probe_fs.cpp): SDL_SetWindowFullscreenMode
+     (win, nullptr) is a silent no-op; the reliable paths are
+     SDL_SetWindowFullscreen(win, true) [enters fullscreen with the
+     stored mode; NULL = borderless] and SDL_SetWindowFullscreenMode(win,
+     mode) called WHILE already fullscreen [switches to exclusive,
+     async — SyncWindow after]. The stored mode persists after leaving
+     fullscreen, so the cycle clears it before entering borderless. If a
+     driver lacks exclusive the cycle latches (exclusive_unavailable_)
+     and degrades to windowed<->borderless, logged once.
+   - main.cpp: --res-scale S (clamped 1..4), --blit-filter
+     linear|nearest|integer, F11 in both event loops (legacy + scene)
+     with a console line on mode change.
+   - Tests: w3d_window_tests (tests/test_window.cpp) drives
+     cycle_fullscreen() against the real display; skips headless. On the
+     N1X the full cycle passes: windowed -> borderless -> exclusive ->
+     windowed -> borderless (7 checks).
+   - Evidence (scratch/w3d_ref): ws3_s2_internal.bmp (640x400 frame),
+     ws3_win_s2_linear.bmp / ws3_win_s2_nearest.bmp (800x400 window,
+     80px side bars), ws3_win_s4_linear.bmp (960x640 window, 20px top/bot
+     bars, 0.75x downscale). All verified by eye + programmatic bar
+     measurement.
+   - Bench (N1X, --sod level 1, scripted 4000 frames, last 1s window,
+     640x400 window, unthrottled): S=1 ~1600 fps (64k px), S=2 ~735
+     (256k), S=3 ~517 (576k), S=4 ~323 (1024k). 4x = 16x pixels but only
+     ~5x the time of 1x (bandwidth/compute mix); every scale clears 60
+     fps by a wide margin, so 4x is free to offer.
+   - NOTE: injected keyboard input (SendInput / PostMessage WM_KEYDOWN)
+     does NOT produce SDL key events on this box (WM_CLOSE via
+     PostMessage does reach SDL — the pump works). F11 e2e is therefore
+     verified by w3d_window_tests + the 3-line handler, and needs one
+     manual keypress by a human.
 4. Config: JSON writer/parser, load/save, live-apply hooks; options
    screen sections.
 5. Audio device: miniaudio in .build/deps; pull callback; music loop;
@@ -373,10 +416,12 @@ Suggested branch: phase-5-ui-hud (naming convention: no acronyms —
   level->music mapping, score formula, difficulty multipliers, high-score
   table size) lives in the original EXE — transcribe from public
   screenshots/docs; every transcription is a verify-by-play item.
-- 4x internal (1280x800) = 16x the compute of 1x on ARM64 — benchmark at
-  workstream 3; option stays either way, note cost if it matters.
-- Exclusive fullscreen on Windows ARM64 may be flaky; fallback =
-  windowed + borderless only (document if so).
+- 4x internal (1280x800) = 16x the pixel count of 1x on ARM64 — RESOLVED
+  (WS3 bench): ~323 fps on the N1X, sublinear in pixel count; option
+  kept, no cost caveat needed.
+- Exclusive fullscreen on Windows ARM64 — RESOLVED (WS3): works on the
+  N1X (verified by w3d_window_tests); the latched windowed<->borderless
+  degradation covers drivers without it.
 - miniaudio on ARM64 Windows: single header, expected to compile clean;
   OPL2 render cost per 48k pull callback — benchmark, add ring-buffer
   pre-render if >~5% CPU.

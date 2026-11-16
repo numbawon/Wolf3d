@@ -38,12 +38,18 @@ struct WallTimerLookup {
     const std::vector<Simulation::WallTimer>& walls;
 };
 
-void build_columns(Frame& f, const Simulation& sim) {
+void build_columns(Frame& f, const Simulation& sim, std::uint32_t scale) {
     const WallTimerLookup wall_lookup{sim.pushwalls()};
+    // WS3: the DDA runs one ray per internal column, over W = 320*scale
+    // columns, with the reference wall height scaled by the same factor
+    // (wallHeight = pixelWidth / (2*fov) = 160*scale). At scale 1 every
+    // operand is exactly the reference 320x200 value (bit-identical).
+    const int W = kColumns * static_cast<int>(scale);
+    const double wall_height = kWallHeight * static_cast<double>(scale);
 
-    for (int i = 0; i < kColumns; ++i) {
+    for (int i = 0; i < W; ++i) {
         // current column position on the camera plane (reference: shift)
-        const double shift = kFov * ((i << 1) - kColumns) / kColumns;
+        const double shift = kFov * ((i << 1) - W) / W;
         // direction of the ray
         double dx = f.pdx - shift * f.pdy;
         double dy = f.pdy + shift * f.pdx;
@@ -252,9 +258,9 @@ void build_columns(Frame& f, const Simulation& sim) {
             }
         }
 
-        ColumnRecord& rec = f.columns[i];
+        ColumnRecord& rec = f.columns[static_cast<std::size_t>(i)];
         rec.t = t;
-        rec.h = kWallHeight / (2 * t);
+        rec.h = wall_height / (2 * t);
         rec.tx = tx;
         rec.tex = static_cast<std::uint32_t>(texture_index);
     }
@@ -263,8 +269,15 @@ void build_columns(Frame& f, const Simulation& sim) {
 // JS Math.round: round half up (floor(x + 0.5)).
 inline double js_round(double x) { return std::floor(x + 0.5); }
 
-void build_sprites(Frame& f, const Simulation& sim) {
+void build_sprites(Frame& f, const Simulation& sim, std::uint32_t scale) {
     const auto& level = sim.level();
+    // WS3: sprite screen geometry is authored in the internal pixel space
+    // (W x H) with the scaled wall height — the reference drawThings /
+    // drawSprite formulas with pixelWidth/height and wallHeight scaled by
+    // the same factor. At scale 1 every value is the reference 320x200 one.
+    const int W = kColumns * static_cast<int>(scale);
+    const int H = kRows * static_cast<int>(scale);
+    const double wall_height = kWallHeight * static_cast<double>(scale);
 
     // Collect renderable things (reference drawThings input), then order
     // them NEAREST-FIRST. The reference draws them farthest-first (painter's
@@ -301,9 +314,9 @@ void build_sprites(Frame& f, const Simulation& sim) {
     if (out < kMaxSprites) {
         SpriteRecord& w = f.sprites[out++];
         // reference drawWeapon at 320x200 (zoom 2): height 192, bottom center
-        const double height = 192.0;
-        w.x0 = kColumns / 2.0 - height / 2.0;
-        w.y0 = kRows - height;
+        const double height = 192.0 * static_cast<double>(scale);
+        w.x0 = W / 2.0 - height / 2.0;
+        w.y0 = H - height;
         w.s = height / 64.0;
         w.scale = static_cast<std::uint32_t>(std::ceil(height / 64.0));
         w.sprite = f.weapon_sprite;
@@ -322,13 +335,13 @@ void build_sprites(Frame& f, const Simulation& sim) {
         if (out >= kMaxSprites)
             break;
 
-        const double h = kWallHeight / th.rx;
+        const double h = wall_height / th.rx;
         SpriteRecord& r = f.sprites[out];
         // Reference drawThings: tx/ty use JS ~~ (truncation toward zero),
         // which differs from floor for negative non-integers (close sprites
         // can project partly off-screen).
-        r.x0 = js_trunc((th.ry / th.rx + kFov) * kWallHeight - h / 2.0);
-        r.y0 = js_trunc((kRows - h) / 2.0);
+        r.x0 = js_trunc((th.ry / th.rx + kFov) * wall_height - h / 2.0);
+        r.y0 = js_trunc((H - h) / 2.0);
         r.s = h / 64.0;
         r.scale = static_cast<std::uint32_t>(std::ceil(h / 64.0));
         r.dist = th.rx;
@@ -417,7 +430,9 @@ void effective_palette(const Flash& fl,
 void build_frame(Frame& f, const Simulation& sim, const Pose& prev_pose,
                  const std::array<Frame::ActorSnap, kMaxSprites>& prev_snap,
                  int prev_snap_count, int prev_weapon_cooldown,
-                 int weapon_shift) {
+                 int weapon_shift, std::uint32_t scale) {
+    scale = std::clamp<std::uint32_t>(scale, 1, kMaxScale);
+    f.scale = scale;
     const auto& level = sim.level();
 
     f.px = sim.x();
@@ -474,8 +489,8 @@ void build_frame(Frame& f, const Simulation& sim, const Pose& prev_pose,
         f.wall_dy[i] = static_cast<float>(w.dy);
     }
 
-    build_columns(f, sim);
-    build_sprites(f, sim);
+    build_columns(f, sim, scale);
+    build_sprites(f, sim, scale);
 
     // Actor snapshot + flash event detection. The reference fires its
     // flashes from key/collect events; on the shipped maps the only events
