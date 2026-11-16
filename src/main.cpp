@@ -33,10 +33,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "app/menu.hpp"
+#include "app/scene.hpp"
 #include "game/input.hpp"
 #include "game/level.hpp"
 #include "game/sim.hpp"
@@ -76,6 +79,10 @@ struct Args {
     bool one_frame = false;
     bool no_fog = false;
     bool pose = false;
+    // Scene mode (WS2): start in a given scene and capture the first menu
+    // frame (hidden window, one frame) — test hooks for the menu pass.
+    std::string scene_start;
+    std::string menu_shot;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -99,11 +106,16 @@ Args parse_args(int argc, char** argv) {
             a.no_fog = true;
         } else if (std::strcmp(argv[i], "--pose") == 0) {
             a.pose = true;
+        } else if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
+            a.scene_start = argv[++i];
+        } else if (std::strcmp(argv[i], "--menu-shot") == 0 && i + 1 < argc) {
+            a.menu_shot = argv[++i];
         } else {
             std::fprintf(stderr,
                          "usage: w3d_app [--level N] [--sod] "
                          "[--data-dir PATH] [--script FILE] "
-                         "[--screenshot PATH] [--frames N] [--one-frame]\n");
+                         "[--screenshot PATH] [--frames N] [--one-frame] "
+                         "[--scene NAME] [--menu-shot PATH]\n");
             std::abort();
         }
     }
@@ -113,7 +125,19 @@ Args parse_args(int argc, char** argv) {
     }
     if (a.one_frame)
         a.frames = 1;
+    if (!a.menu_shot.empty())
+        a.frames = 1;
     return a;
+}
+
+// SDL3 3.4.x reports key names capitalized ("Up", "W"); the scene machine
+// matches lower-cased names.
+std::string lower_key(const char* k) {
+    std::string s = k ? k : "";
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    return s;
 }
 
 // Deterministic input script (see the file header). Movement keys are held
@@ -257,13 +281,20 @@ int main(int argc, char** argv) {
             return 1;
     }
 
-    // ---- Simulation
-    auto level = w3d::game::Level::from_map(
-        maps.maps[static_cast<std::size_t>(args.level)]);
-    Simulation sim(std::move(level));
-    if (!sim.level().has_start) {
-        std::fprintf(stderr, "w3d: level %d has no player start\n", args.level);
-        return 1;
+    // Legacy (deterministic harness) mode: fixed level, direct sim — the
+    // Phase 3/4 pipeline, untouched. Scene mode (WS2 default): the scene
+    // machine picks the level; the sim is created on Game-scene entry.
+    const bool legacy = !args.script.empty() || !args.screenshot.empty();
+    std::optional<w3d::game::Level> opt_level;
+    if (legacy) {
+        auto level = w3d::game::Level::from_map(
+            maps.maps[static_cast<std::size_t>(args.level)]);
+        if (!level.has_start) {
+            std::fprintf(stderr, "w3d: level %d has no player start\n",
+                         args.level);
+            return 1;
+        }
+        opt_level.emplace(std::move(level));
     }
 
     // ---- Window + renderer
@@ -276,9 +307,9 @@ int main(int argc, char** argv) {
     VkInstance instance = Renderer::create_instance();
     {
         SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
-        if (args.one_frame)
+        if (args.one_frame || !args.menu_shot.empty())
             flags |= SDL_WINDOW_HIDDEN;
-        Window window(640, 400, "wolf3d (phase 3)", instance, flags);
+        Window window(640, 400, "wolf3d (phase 5)", instance, flags);
         Renderer renderer(window, instance);
 
         // Static atlases from the VSWAP banks.
@@ -310,6 +341,8 @@ int main(int argc, char** argv) {
         std::uint64_t fps_last = SDL_GetTicks();
         uint32_t fps_frames = 0;
         bool quit = false;
+        if (legacy) {
+            Simulation sim(std::move(*opt_level));
         while (!quit) {
             // SDL events (window close, Esc, live keys, relative mouse).
             bool window_open = true;
@@ -396,10 +429,163 @@ int main(int argc, char** argv) {
             if (!scripted)
                 SDL_Delay(16);  // ~60 Hz
         }
-    }
-    if (args.pose) {
-        std::printf("pose x=%.17g y=%.17g dx=%.17g dy=%.17g\n", sim.x(),
-                    sim.y(), sim.dx(), sim.dy());
+        if (args.pose) {
+            std::printf("pose x=%.17g y=%.17g dx=%.17g dy=%.17g\n", sim.x(),
+                        sim.y(), sim.dx(), sim.dy());
+        }
+        } else {
+            // ---- Scene mode (WS2): scene machine + full-res menus ----
+            w3d::app::SceneState scene = args.scene_start.empty()
+                ? w3d::app::SceneState()
+                : w3d::app::SceneState::from_name(args.scene_start);
+            std::unique_ptr<Simulation> scene_sim;
+            int scene_sim_level = -1;
+            auto ensure_sim = [&]() {
+                if (scene_sim && scene_sim_level == scene.level())
+                    return;
+                const int lvl =
+                    std::min(scene.level(),
+                             static_cast<int>(maps.maps.size()) - 1);
+                scene_sim = std::make_unique<Simulation>(
+                    w3d::game::Level::from_map(maps.maps[static_cast<std::size_t>(lvl)]));
+                scene_sim_level = lvl;
+                flash = Flash{};
+                w3d::render::effective_palette(flash, palette);
+                prev_snap = {};
+                prev_snap_count = 0;
+                prev_weapon_cooldown = 0;
+            };
+            bool was_in_game = false;
+            while (!quit) {
+                // SDL events: routed to the scene machine, or to live
+                // input while in the Game scene.
+                bool window_open = true;
+                SDL_Event ev{};
+                while (SDL_PollEvent(&ev)) {
+                    if (ev.type == SDL_EVENT_QUIT ||
+                        ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                        window_open = false;
+                    } else if (ev.type == SDL_EVENT_KEY_DOWN) {
+                        const char* raw = SDL_GetKeyName(ev.key.key);
+                        if (scene.scene() == w3d::app::Scene::Game) {
+                            live.on_key(raw, true);
+                        } else {
+                            w3d::app::InputEvent ie;
+                            ie.kind = w3d::app::InputEvent::KeyDown;
+                            ie.key = lower_key(raw);
+                            scene.on_input(ie);
+                        }
+                    } else if (ev.type == SDL_EVENT_KEY_UP) {
+                        if (scene.scene() == w3d::app::Scene::Game)
+                            live.on_key(SDL_GetKeyName(ev.key.key), false);
+                    } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                        if (ev.button.button == SDL_BUTTON_LEFT) {
+                            if (scene.scene() == w3d::app::Scene::Game) {
+                                // Left click: first click captures the
+                                // mouse for turning; while captured, button
+                                // 1 fires (original behavior).
+                                if (SDL_GetWindowRelativeMouseMode(
+                                        window.window()))
+                                    live.shoot();
+                                else
+                                    SDL_SetWindowRelativeMouseMode(
+                                        window.window(), true);
+                            } else {
+                                w3d::app::InputEvent ie;
+                                ie.kind = w3d::app::InputEvent::MouseClick;
+                                ie.mx = static_cast<int>(ev.button.x);
+                                ie.my = static_cast<int>(ev.button.y);
+                                scene.on_input(ie);
+                            }
+                        }
+                    } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                        if (scene.scene() == w3d::app::Scene::Game) {
+                            live.on_mouse(ev.motion.xrel);
+                        } else {
+                            w3d::app::InputEvent ie;
+                            ie.kind = w3d::app::InputEvent::MouseMove;
+                            ie.mx = static_cast<int>(ev.motion.x);
+                            ie.my = static_cast<int>(ev.motion.y);
+                            scene.on_input(ie);
+                        }
+                    }
+                }
+                if (!window_open || scene.quit_requested())
+                    quit = true;
+                if (args.frames != 0 && frame_idx >= args.frames)
+                    quit = true;
+
+                const bool in_game = scene.scene() == w3d::app::Scene::Game;
+                if (in_game && !was_in_game)
+                    ensure_sim();
+                if (!in_game && was_in_game)
+                    // Leaving the Game scene: release the captured mouse.
+                    SDL_SetWindowRelativeMouseMode(window.window(), false);
+                was_in_game = in_game;
+
+                if (renderer.begin_frame()) {
+                    if (in_game) {
+                        // The Phase 3 pipeline, driven by the scene's sim.
+                        const w3d::render::Pose pre_pose{
+                            scene_sim->x(), scene_sim->y(),
+                            scene_sim->dx(), scene_sim->dy()};
+                        const SimInput in = live.take();
+                        scene_sim->tick(in);
+                        w3d::render::build_frame(
+                            frame, *scene_sim, pre_pose, prev_snap,
+                            prev_snap_count, prev_weapon_cooldown,
+                            weapon_shift);
+                        prev_weapon_cooldown = scene_sim->weapon_cooldown();
+                        prev_snap = frame.actor_snap;
+                        prev_snap_count = frame.actor_snap_count;
+                        w3d::render::update_flash(flash, frame.flash_event);
+                        w3d::render::effective_palette(flash, palette);
+                        renderer.render_frame(frame, palette, false,
+                                              !args.no_fog);
+                    } else {
+                        uint32_t mw = 0, mh = 0;
+                        renderer.swapchain_size(mw, mh);
+                        scene.set_window(static_cast<int>(mw),
+                                         static_cast<int>(mh));
+                        w3d::app::MenuDraw md;
+                        w3d::app::build_menu(scene, static_cast<int>(mw),
+                                             static_cast<int>(mh), md);
+                        renderer.render_menu(md);
+                    }
+                    renderer.present();
+                    if (!args.menu_shot.empty() && frame_idx == 0) {
+                        std::vector<uint8_t> px;
+                        uint32_t mw = 0, mh = 0;
+                        if (renderer.readback_menu(px, mw, mh) &&
+                            w3d::util::write_bmp(args.menu_shot, mw, mh,
+                                                 px.data())) {
+                            std::printf("w3d: saved %s\n",
+                                        args.menu_shot.c_str());
+                        } else {
+                            std::fprintf(stderr,
+                                         "w3d: menu screenshot failed\n");
+                            rc = 1;
+                        }
+                    }
+                } else {
+                    rc = 1;
+                    quit = true;
+                }
+                frame_idx++;
+                {
+                    const std::uint64_t now = SDL_GetTicks();
+                    if (now - fps_last >= 1000) {
+                        std::printf("w3d: %d fps\n",
+                                    static_cast<int>(
+                                        (frame_idx - fps_frames) * 1000 /
+                                        (now - fps_last)));
+                        fps_last = now;
+                        fps_frames = frame_idx;
+                    }
+                }
+                SDL_Delay(16);  // ~60 Hz
+            }
+        }
     }
     vkDestroyInstance(instance, nullptr);
     SDL_Quit();

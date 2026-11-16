@@ -72,6 +72,19 @@ else()
   target_compile_options(w3d_audio PRIVATE -Wall -Wextra)
 endif()
 
+# Phase 5: UI — scene state machine + full-res menu model (WS2). Pure C++
+# (no SDL / Vulkan) so it is testable headless; the renderer consumes
+# app/menu.hpp (POD, std430-matched) and app/font8x16.inc.
+add_library(w3d_appui STATIC
+    src/app/scene.cpp
+    src/app/menu.cpp)
+target_include_directories(w3d_appui PUBLIC src)
+if(MSVC)
+  target_compile_options(w3d_appui PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(w3d_appui PRIVATE -Wall -Wextra)
+endif()
+
 if(W3D_BUILD_TESTS)
   enable_testing()
   add_executable(w3d_tests tests/test_formats.cpp)
@@ -100,6 +113,13 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_audio_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME audio COMMAND w3d_audio_tests)
+
+  add_executable(w3d_scene_tests tests/test_scene.cpp)
+  target_link_libraries(w3d_scene_tests PRIVATE w3d_appui)
+  if(MSVC)
+    target_compile_options(w3d_scene_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME scene COMMAND w3d_scene_tests)
 endif()
 
 # Phase 4: audio evidence tool — renders the game's music / FM effects / a
@@ -192,8 +212,8 @@ if(W3D_BUILD_RENDER)
 
   # Game application (M3: simulation + raycast renderer).
   add_executable(w3d_app src/main.cpp)
-  target_link_libraries(w3d_app PRIVATE w3d_render w3d_game)
-  w3d_add_shaders(w3d_app walls.comp sprites.comp)
+  target_link_libraries(w3d_app PRIVATE w3d_render w3d_game w3d_appui)
+  w3d_add_shaders(w3d_app walls.comp sprites.comp menu.comp)
   if(MSVC)
     target_compile_options(w3d_app PRIVATE /W4 /permissive- /utf-8)
   endif()

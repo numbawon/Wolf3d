@@ -11,6 +11,7 @@
 #include <fstream>
 #include <utility>
 
+#include "app/font8x16.inc"  // kFont8x16[95][16], the menu font bitmap
 #include "vk_common.hpp"
 
 namespace w3d::render {
@@ -329,7 +330,8 @@ Renderer::Renderer(Window& window, VkInstance instance)
         VK_SUCCESS)
         vk_fail("vkCreatePipelineLayout", VK_ERROR_INITIALIZATION_FAILED);
 
-    auto make_pipe = [&](const char* spv_name, VkPipeline* out) {
+    auto make_pipe = [&](const char* spv_name, VkPipeline* out,
+                         VkPipelineLayout pipe_layout) {
         const auto spv = load_file(exe_dir() / "shaders" / spv_name);
         VkShaderModuleCreateInfo smci{};
         smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -347,14 +349,14 @@ Renderer::Renderer(Window& window, VkInstance instance)
         stage.module = mod;
         stage.pName = "main";
         cpci.stage = stage;
-        cpci.layout = layout_;
+        cpci.layout = pipe_layout;
         if (vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &cpci, nullptr,
                                      out) != VK_SUCCESS)
             vk_fail("vkCreateComputePipelines", VK_ERROR_INITIALIZATION_FAILED);
         return mod;
     };
-    walls_mod_ = make_pipe("walls.spv", &walls_pipe_);
-    sprites_mod_ = make_pipe("sprites.spv", &sprites_pipe_);
+    walls_mod_ = make_pipe("walls.spv", &walls_pipe_, layout_);
+    sprites_mod_ = make_pipe("sprites.spv", &sprites_pipe_, layout_);
 
     // ---- Descriptor set (buffer entries filled by load_atlases)
     VkDescriptorPoolSize dps[7]{};
@@ -447,6 +449,119 @@ Renderer::Renderer(Window& window, VkInstance instance)
         window_.size(w, h);
         create_swapchain(w, h);
     }
+
+    // ---- Full-res menu pass (WS2): pipeline, buffers, descriptors ----
+    VkDescriptorSetLayoutBinding mb[3]{};
+    mb[0].binding = 0;
+    mb[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    mb[0].descriptorCount = 1;
+    mb[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;  // MenuDraw
+    mb[1].binding = 1;
+    mb[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    mb[1].descriptorCount = 1;
+    mb[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;  // font
+    mb[2].binding = 2;
+    mb[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    mb[2].descriptorCount = 1;
+    mb[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    VkDescriptorSetLayoutCreateInfo mdsl{};
+    mdsl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    mdsl.bindingCount = 3;
+    mdsl.pBindings = mb;
+    if (vkCreateDescriptorSetLayout(device_, &mdsl, nullptr, &menu_dsl_) !=
+        VK_SUCCESS)
+        vk_fail("vkCreateDescriptorSetLayout(menu)",
+                VK_ERROR_INITIALIZATION_FAILED);
+    VkPipelineLayoutCreateInfo mpl{};
+    mpl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    mpl.setLayoutCount = 1;
+    mpl.pSetLayouts = &menu_dsl_;
+    if (vkCreatePipelineLayout(device_, &mpl, nullptr, &menu_layout_) !=
+        VK_SUCCESS)
+        vk_fail("vkCreatePipelineLayout(menu)", VK_ERROR_INITIALIZATION_FAILED);
+    // The menu pipeline is built against its OWN 3-binding layout: the
+    // game's 7-set layout would silently mismatch the bound set (binding
+    // 2 = storage image here vs storage buffer there — undefined
+    // behaviour, and this driver renders it as an all-zero image).
+    menu_mod_ = make_pipe("menu.spv", &menu_pipe_, menu_layout_);
+    VkBufferCreateInfo mbi{};
+    mbi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    mbi.size = sizeof(app::MenuDraw);
+    mbi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (vkCreateBuffer(device_, &mbi, nullptr, &menu_data_) != VK_SUCCESS)
+        vk_fail("vkCreateBuffer(menu data)", VK_ERROR_INITIALIZATION_FAILED);
+    VkMemoryRequirements mmr{};
+    vkGetBufferMemoryRequirements(device_, menu_data_, &mmr);
+    alloc_mem(mmr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, menu_data_mem_);
+    vkBindBufferMemory(device_, menu_data_, menu_data_mem_, 0);
+    if (vkMapMemory(device_, menu_data_mem_, 0, VK_WHOLE_SIZE, 0,
+                    &menu_data_map_) != VK_SUCCESS)
+        vk_fail("vkMapMemory(menu data)", VK_ERROR_MEMORY_MAP_FAILED);
+    mbi.size = 95u * 16;
+    if (vkCreateBuffer(device_, &mbi, nullptr, &menu_font_) != VK_SUCCESS)
+        vk_fail("vkCreateBuffer(menu font)", VK_ERROR_INITIALIZATION_FAILED);
+    vkGetBufferMemoryRequirements(device_, menu_font_, &mmr);
+    alloc_mem(mmr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, menu_font_mem_);
+    vkBindBufferMemory(device_, menu_font_, menu_font_mem_, 0);
+    {
+        void* fmap = nullptr;
+        if (vkMapMemory(device_, menu_font_mem_, 0, VK_WHOLE_SIZE, 0,
+                        &fmap) != VK_SUCCESS)
+            vk_fail("vkMapMemory(menu font)", VK_ERROR_MEMORY_MAP_FAILED);
+        std::memcpy(fmap, kFont8x16, sizeof(kFont8x16));
+        VkMappedMemoryRange mfr{};
+        mfr.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        mfr.memory = menu_font_mem_;
+        mfr.offset = 0;
+        mfr.size = VK_WHOLE_SIZE;
+        vkFlushMappedMemoryRanges(device_, 1, &mfr);
+        vkUnmapMemory(device_, menu_font_mem_);
+    }
+    {
+        VkDescriptorPoolSize mps[2]{};
+        mps[0] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+        mps[1] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
+        VkDescriptorPoolCreateInfo mdpci{};
+        mdpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        mdpci.maxSets = 1;
+        mdpci.poolSizeCount = 2;
+        mdpci.pPoolSizes = mps;
+        if (vkCreateDescriptorPool(device_, &mdpci, nullptr, &menu_dpool_) !=
+            VK_SUCCESS)
+            vk_fail("vkCreateDescriptorPool(menu)",
+                    VK_ERROR_INITIALIZATION_FAILED);
+        VkDescriptorSetAllocateInfo mdsa{};
+        mdsa.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        mdsa.descriptorPool = menu_dpool_;
+        mdsa.descriptorSetCount = 1;
+        mdsa.pSetLayouts = &menu_dsl_;
+        if (vkAllocateDescriptorSets(device_, &mdsa, &menu_dset_) !=
+            VK_SUCCESS)
+            vk_fail("vkAllocateDescriptorSets(menu)",
+                    VK_ERROR_OUT_OF_HOST_MEMORY);
+        VkDescriptorBufferInfo mbf[2]{};
+        mbf[0].buffer = menu_data_;
+        mbf[0].offset = 0;
+        mbf[0].range = sizeof(app::MenuDraw);
+        mbf[1].buffer = menu_font_;
+        mbf[1].offset = 0;
+        mbf[1].range = 95u * 16;
+        VkWriteDescriptorSet mwds[2]{};
+        for (int i = 0; i < 2; ++i) {
+            mwds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            mwds[i].dstSet = menu_dset_;
+            mwds[i].dstBinding = i;
+            mwds[i].descriptorCount = 1;
+            mwds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            mwds[i].pBufferInfo = &mbf[i];
+        }
+        vkUpdateDescriptorSets(device_, 2, mwds, 0, nullptr);
+    }
+    {
+        uint32_t mw = 0, mh = 0;
+        window_.size(mw, mh);
+        create_menu_target(mw, mh);
+    }
 }
 
 Renderer::~Renderer() {
@@ -454,6 +569,36 @@ Renderer::~Renderer() {
         return;
     vkDeviceWaitIdle(device_);
     destroy_swapchain();
+    if (menu_img_view_)
+        vkDestroyImageView(device_, menu_img_view_, nullptr);
+    if (menu_img_)
+        vkDestroyImage(device_, menu_img_, nullptr);
+    if (menu_img_mem_)
+        vkFreeMemory(device_, menu_img_mem_, nullptr);
+    if (menu_staging_mem_)
+        vkFreeMemory(device_, menu_staging_mem_, nullptr);
+    if (menu_staging_)
+        vkDestroyBuffer(device_, menu_staging_, nullptr);
+    if (menu_data_map_)
+        vkUnmapMemory(device_, menu_data_mem_);
+    if (menu_data_mem_)
+        vkFreeMemory(device_, menu_data_mem_, nullptr);
+    if (menu_data_)
+        vkDestroyBuffer(device_, menu_data_, nullptr);
+    if (menu_font_mem_)
+        vkFreeMemory(device_, menu_font_mem_, nullptr);
+    if (menu_font_)
+        vkDestroyBuffer(device_, menu_font_, nullptr);
+    if (menu_pipe_)
+        vkDestroyPipeline(device_, menu_pipe_, nullptr);
+    if (menu_mod_)
+        vkDestroyShaderModule(device_, menu_mod_, nullptr);
+    if (menu_dpool_)
+        vkDestroyDescriptorPool(device_, menu_dpool_, nullptr);
+    if (menu_dsl_)
+        vkDestroyDescriptorSetLayout(device_, menu_dsl_, nullptr);
+    if (menu_layout_)
+        vkDestroyPipelineLayout(device_, menu_layout_, nullptr);
     if (frame_map_)
         vkUnmapMemory(device_, frame_mem_);
     if (frame_mem_)
@@ -820,12 +965,14 @@ bool Renderer::begin_frame() {
     if (w != swap_w_ || h != swap_h_) {
         destroy_swapchain();
         create_swapchain(w, h);
+        create_menu_target(w, h);
     }
     VkResult r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
                                        acquire_sem_, VK_NULL_HANDLE, &acquired_);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
         destroy_swapchain();
         create_swapchain(w, h);
+        create_menu_target(w, h);
         r = vkAcquireNextImageKHR(device_, swap_, 1000000000ull,
                                   acquire_sem_, VK_NULL_HANDLE, &acquired_);
     }
@@ -889,6 +1036,181 @@ bool Renderer::readback(std::vector<uint8_t>& out) {
         }
     }
     return true;
+}
+
+void Renderer::create_menu_target(uint32_t w, uint32_t h) {
+    // Menus render at window resolution (the MenuDraw coordinates are in
+    // window px) and are blitted 1:1 into the swapchain.
+    menu_w_ = w;
+    menu_h_ = h;
+    if (menu_img_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, menu_img_view_, nullptr);
+        vkDestroyImage(device_, menu_img_, nullptr);
+        vkFreeMemory(device_, menu_img_mem_, nullptr);
+        menu_img_ = VK_NULL_HANDLE;
+        menu_img_view_ = VK_NULL_HANDLE;
+        menu_img_mem_ = VK_NULL_HANDLE;
+    }
+    VkImageCreateInfo mi{};
+    mi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    mi.imageType = VK_IMAGE_TYPE_2D;
+    mi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    mi.extent = {w, h, 1};
+    mi.mipLevels = 1;
+    mi.arrayLayers = 1;
+    mi.samples = VK_SAMPLE_COUNT_1_BIT;
+    mi.tiling = VK_IMAGE_TILING_OPTIMAL;
+    mi.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    mi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device_, &mi, nullptr, &menu_img_) != VK_SUCCESS)
+        vk_fail("vkCreateImage(menu)", VK_ERROR_INITIALIZATION_FAILED);
+    VkMemoryRequirements imr{};
+    vkGetImageMemoryRequirements(device_, menu_img_, &imr);
+    alloc_mem(imr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, menu_img_mem_);
+    vkBindImageMemory(device_, menu_img_, menu_img_mem_, 0);
+    VkImageViewCreateInfo ivi{};
+    ivi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivi.image = menu_img_;
+    ivi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(device_, &ivi, nullptr, &menu_img_view_) !=
+        VK_SUCCESS)
+        vk_fail("vkCreateImageView(menu)", VK_ERROR_INITIALIZATION_FAILED);
+    if (menu_staging_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, menu_staging_, nullptr);
+        vkFreeMemory(device_, menu_staging_mem_, nullptr);
+        menu_staging_ = VK_NULL_HANDLE;
+        menu_staging_mem_ = VK_NULL_HANDLE;
+    }
+    VkMemoryRequirements mr{};
+    VkBufferCreateInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = static_cast<VkDeviceSize>(menu_w_) * menu_h_ * 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bi, nullptr, &menu_staging_) != VK_SUCCESS)
+        vk_fail("vkCreateBuffer(menu staging)", VK_ERROR_INITIALIZATION_FAILED);
+    vkGetBufferMemoryRequirements(device_, menu_staging_, &mr);
+    alloc_mem(mr, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, menu_staging_mem_);
+    vkBindBufferMemory(device_, menu_staging_, menu_staging_mem_, 0);
+    // Refresh the descriptor set's image binding (the set is reused).
+    VkDescriptorImageInfo dii{};
+    dii.imageView = menu_img_view_;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet wds{};
+    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds.dstSet = menu_dset_;
+    wds.dstBinding = 2;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &wds, 0, nullptr);
+}
+
+void Renderer::render_menu(const app::MenuDraw& d) {
+    // Upload the per-frame menu description (host visible, mapped).
+    std::memcpy(menu_data_map_, &d, sizeof(app::MenuDraw));
+    VkMappedMemoryRange r{};
+    r.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    r.memory = menu_data_mem_;
+    r.offset = 0;
+    r.size = VK_WHOLE_SIZE;
+    vkFlushMappedMemoryRanges(device_, 1, &r);
+
+    VkCommandBufferBeginInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(cmd_, &bci) != VK_SUCCESS)
+        vk_fail("vkBeginCommandBuffer", VK_ERROR_INITIALIZATION_FAILED);
+
+    VkImageMemoryBarrier bar{};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    bar.srcAccessMask = 0;
+    bar.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = menu_img_;
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &bar);
+
+    // Full-window dispatch (8x8 workgroups).
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, menu_pipe_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            menu_layout_, 0, 1, &menu_dset_, 0, nullptr);
+    vkCmdDispatch(cmd_, (menu_w_ + 7) / 8, (menu_h_ + 7) / 8, 1);
+
+    bar = {};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bar.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bar.image = menu_img_;
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &bar);
+
+    // 2x NEAREST blit into the swapchain (menu is 320x200 internal, the
+    // same present path as game frames).
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[0] = {0, 0, 0};
+    blit.srcOffsets[1] = {static_cast<int32_t>(menu_w_),
+                          static_cast<int32_t>(menu_h_), 1};
+    blit.dstOffsets[0] = {0, 0, 0};
+    blit.dstOffsets[1] = {static_cast<int32_t>(swap_w_),
+                          static_cast<int32_t>(swap_h_), 1};
+    vkCmdBlitImage(cmd_, menu_img_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   swap_images_[acquired_], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                   1, &blit, VK_FILTER_NEAREST);
+
+    // Copy to staging so readback_menu can grab it (always recorded; the
+    // menu is only shown in UI mode and the copy is cheap).
+    VkBufferImageCopy bic{};
+    bic.bufferOffset = 0;
+    bic.bufferRowLength = 0;
+    bic.bufferImageHeight = 0;
+    bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    bic.imageOffset = {0, 0, 0};
+    bic.imageExtent = {menu_w_, menu_h_, 1};
+    vkCmdCopyImageToBuffer(cmd_, menu_img_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           menu_staging_, 1, &bic);
+
+    if (vkEndCommandBuffer(cmd_) != VK_SUCCESS)
+        vk_fail("vkEndCommandBuffer", VK_ERROR_INITIALIZATION_FAILED);
+    has_work_ = true;
+}
+
+bool Renderer::readback_menu(std::vector<uint8_t>& out, uint32_t& w,
+                             uint32_t& h) {
+    const VkResult wr = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
+                                        1000000000ull);
+    if (wr != VK_SUCCESS)
+        return false;
+    void* data = nullptr;
+    if (vkMapMemory(device_, menu_staging_mem_, 0, VK_WHOLE_SIZE, 0,
+                    &data) != VK_SUCCESS)
+        return false;
+    const size_t bytes = static_cast<size_t>(menu_w_) * menu_h_ * 4;
+    out.resize(bytes);
+    std::memcpy(out.data(), data, bytes);
+    vkUnmapMemory(device_, menu_staging_mem_);
+    w = menu_w_;
+    h = menu_h_;
+    return true;
+}
+
+void Renderer::swapchain_size(uint32_t& w, uint32_t& h) const {
+    w = swap_w_;
+    h = swap_h_;
 }
 
 } // namespace w3d::render

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "app/menu.hpp"
 #include "frame.hpp"
 #include "window.hpp"
 
@@ -51,6 +52,16 @@ public:
     // Submits the recorded work and presents.
     void present();
 
+    // ---- Full-res menu pass (WS2) ----
+    // Draws one menu frame (app::MenuDraw) into the window-sized menu
+    // image and blits it 1:1 (nearest) into the swapchain. Pairs with
+    // begin_frame() / present() exactly like render_frame().
+    void render_menu(const app::MenuDraw& d);
+    // Blocks until the last present() completes, then copies the menu
+    // image into out (w*h*4 bytes, top-down); w/h take the size.
+    bool readback_menu(std::vector<uint8_t>& out, uint32_t& w, uint32_t& h);
+    [[nodiscard]] void swapchain_size(uint32_t& w, uint32_t& h) const;
+
     // Blocks until the last present() completes, then copies the internal
     // image into out (kInternalW*kInternalH*4 bytes).
     bool readback(std::vector<uint8_t>& out);
@@ -60,6 +71,9 @@ public:
 private:
     void create_swapchain(uint32_t w, uint32_t h);
     void destroy_swapchain();
+    // (Re)creates the window-sized menu image + staging buffer. Called on
+    // swapchain resize; the descriptor set's image binding is refreshed.
+    void create_menu_target(uint32_t w, uint32_t h);
     uint32_t alloc_mem(const VkMemoryRequirements& mr, uint32_t want_bits,
                        VkDeviceMemory& out);
 
@@ -129,6 +143,27 @@ private:
     VkBuffer frame_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory frame_mem_ = VK_NULL_HANDLE;
     void* frame_map_ = nullptr;
+
+    // Full-res menu pass (WS2): 320x200 storage image + staging,
+    // per-frame MenuDraw SSBO (host visible, mapped), static font SSBO,
+    // dedicated pipeline/descriptors.
+    VkImage menu_img_ = VK_NULL_HANDLE;
+    VkDeviceMemory menu_img_mem_ = VK_NULL_HANDLE;
+    VkImageView menu_img_view_ = VK_NULL_HANDLE;
+    VkBuffer menu_staging_ = VK_NULL_HANDLE;
+    VkDeviceMemory menu_staging_mem_ = VK_NULL_HANDLE;
+    VkBuffer menu_data_ = VK_NULL_HANDLE;
+    VkDeviceMemory menu_data_mem_ = VK_NULL_HANDLE;
+    void* menu_data_map_ = nullptr;
+    VkBuffer menu_font_ = VK_NULL_HANDLE;
+    VkDeviceMemory menu_font_mem_ = VK_NULL_HANDLE;
+    VkShaderModule menu_mod_ = VK_NULL_HANDLE;
+    VkPipeline menu_pipe_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout menu_dsl_ = VK_NULL_HANDLE;
+    VkPipelineLayout menu_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool menu_dpool_ = VK_NULL_HANDLE;
+    VkDescriptorSet menu_dset_ = VK_NULL_HANDLE;
+    uint32_t menu_w_ = 0, menu_h_ = 0;
 };
 
 } // namespace w3d::render
