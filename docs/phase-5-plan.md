@@ -361,11 +361,62 @@ Rebind UI (Controls section of options, full-res modern):
      fps by a wide margin, so 4x is free to offer.
    - NOTE: injected keyboard input (SendInput / PostMessage WM_KEYDOWN)
      does NOT produce SDL key events on this box (WM_CLOSE via
-     PostMessage does reach SDL — the pump works). F11 e2e is therefore
-     verified by w3d_window_tests + the 3-line handler, and needs one
-     manual keypress by a human.
+     PostMessage does reach SDL — the pump works). F11 e2e verified by
+     w3d_window_tests + the 3-line handler; manual keypress confirmed by
+     the user 2026-11-16 (also exercises the live resize/swapchain
+     rebuild, since borderless resizes the window).
 4. Config: JSON writer/parser, load/save, live-apply hooks; options
    screen sections.
+   KICKOFF NOTES (WS4, for a fresh context window):
+   - Current state: zero persistence — all video options are CLI flags
+     (main.cpp Args: --res-scale, --blit-filter, --no-fog, --win, ...).
+     Scene machine (src/app/scene.*) has Title/NewGame/LevelIntro/Game +
+     the full-res menu pass (menu.comp; MenuDraw POD static_assert'd
+     std430, element 80 B / frame 1320 B). Live-apply plumbing for video
+     already exists: renderer.set_res_scale(), set_blit_filter(),
+     window.cycle_fullscreen()/fullscreen_mode(). No Options scene, no
+     config file, no %APPDATA% writes anywhere yet.
+   - Change: new src/app/config.* — pure C++, no SDL (testable headless),
+     minimal hand-rolled JSON writer + tolerant parser (no new
+     dependency, per plan 4.4). File: %APPDATA%\Wolf3DRemake\config.json
+     (env APPDATA; create dir on first write). version field = 1;
+     missing/corrupt file -> defaults + one log line + rewrite; unknown
+     keys dropped on round-trip (document). Save on change + on clean
+     exit (explicit flush at quit, not atexit — console app). CLI flags
+     override the config for the current run and NEVER write the file
+     (the scripted harness must stay deterministic; bench flags included).
+   - Schema v1 (plan 4.4): video {res_scale 1-4, scale_filter
+     linear|nearest|integer, fullscreen_mode windowed|borderless|
+     exclusive, show_fps bool}; audio {master/music/sfx 0-100, music_on,
+     device_id} (STORED ONLY until the WS5 device lands); controls
+     {mouse_sensitivity, bindings} (the bindings EDITOR is WS9);
+     gameplay {difficulty — applies in WS7 with events/score; fog —
+     live, reuses the --no-fog plumbing}.
+   - Options scene: Scene::Options in the scene machine (reachable from
+     Title + Pause), sections as tabs Video/Audio/Controls/Gameplay,
+     live-apply on change: video -> renderer setters + window mode; fog
+     -> renderer flag; everything else stored-only with a "pending"
+     visual. MenuDraw POD grows — re-run the std430 static_assert and the
+     scene centering test after any layout change (audit a93a1e2 trap:
+     centered widths derive from strlen).
+   - Tests: new w3d_config_tests suite: parse/serialize round-trip,
+     corrupt/missing/malformed tolerance, unknown-key drop, default
+     rewrite, version field, CLI-override precedence. All existing 2224
+     checks stay green.
+   - Invariants: scripted harness output unchanged (config must not
+     alter the render path when CLI flags are given); S=1 stays 0/64000;
+     no new runtime dependencies; nothing written outside
+     %APPDATA%\Wolf3DRemake.
+   - Traps to carry (skill): menu element len = stored char count;
+     SDL3 key names CAPITALIZED; one-shot command buffer for
+     constructor-time GPU work; keep the menu pass on SSBOs (UBO
+     256-byte alignment if anything new touches a UBO).
+   - Open items (decide at kickoff, recommendations in parens):
+     (a) audio + gameplay sections stored-only in WS4 (yes — the device
+     is WS5, difficulty applies WS7); (b) show_fps — wire in WS4 (5
+     lines: the per-second fps line already exists in both event loops)
+     and drop it from WS10 polish (yes); (c) Controls tab in WS4 —
+     sensitivity only, bindings omitted until WS9 ships the editor (yes).
 5. Audio device: miniaudio in .build/deps; pull callback; music loop;
    SFX voices; volume/device settings wired.
 6. Gamepad: mapping table, deadzone, rumble, disconnect handling; menu
