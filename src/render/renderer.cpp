@@ -1157,8 +1157,8 @@ void Renderer::render_menu(const app::MenuDraw& d) {
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &bar);
 
-    // 2x NEAREST blit into the swapchain (menu is 320x200 internal, the
-    // same present path as game frames).
+    // 1:1 NEAREST blit into the swapchain (the menu image is already at
+    // window resolution — no scaling).
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};

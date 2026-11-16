@@ -144,7 +144,7 @@ private:
     VkDeviceMemory frame_mem_ = VK_NULL_HANDLE;
     void* frame_map_ = nullptr;
 
-    // Full-res menu pass (WS2): 320x200 storage image + staging,
+    // Full-res menu pass (WS2): window-sized storage image + staging,
     // per-frame MenuDraw SSBO (host visible, mapped), static font SSBO,
     // dedicated pipeline/descriptors.
     VkImage menu_img_ = VK_NULL_HANDLE;

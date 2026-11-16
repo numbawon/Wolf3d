@@ -71,6 +71,18 @@ int center_x(int w, int len, int scale) {
     return (w - len * 8 * scale) / 2;
 }
 
+// Centered text: the width is derived from the string itself, so a
+// changed or longer string can never drift off-center (hard-coded widths
+// did — e.g. the 25-char episode 1 name centered on a 36-char guess).
+void add_centered(MenuDraw& d, int w, float y, float scale, const char* text,
+                  std::uint32_t flags) {
+    add_text(d,
+             static_cast<float>(center_x(
+                 w, static_cast<int>(std::strlen(text)),
+                 static_cast<int>(scale))),
+             y, scale, text, flags);
+}
+
 }  // namespace
 
 void layout_episode_items(int w, int h, std::array<MenuLayout, 4>& out) {
@@ -101,20 +113,18 @@ void build_menu(const SceneState& s, int w, int h, MenuDraw& out) {
     switch (s.scene()) {
     case Scene::Title: {
         const char* title = "WOLFENSTEIN 3D";
-        add_text(out, static_cast<float>(center_x(w, 14, 3)),
-                 static_cast<float>(h / 2 - 64), 3.0f, title, kMenuAccent);
-        add_text(out, static_cast<float>(center_x(w, 14, 1)),
-                 static_cast<float>(h / 2 - 8), 1.0f, "A MODERN REMAKE",
-                 0u);
-        add_text(out, static_cast<float>(center_x(w, 14, 1)),
-                 static_cast<float>(h / 2 + 32), 1.0f, "PRESS ANY KEY",
-                 0u);
+        add_centered(out, w, static_cast<float>(h / 2 - 64), 3.0f, title,
+                     kMenuAccent);
+        add_centered(out, w, static_cast<float>(h / 2 - 8), 1.0f,
+                     "A MODERN REMAKE", 0u);
+        add_centered(out, w, static_cast<float>(h / 2 + 32), 1.0f,
+                     "PRESS ANY KEY", 0u);
         break;
     }
     case Scene::NewGame: {
-        add_text(out, static_cast<float>(center_x(w, 14, 2)),
-                 static_cast<float>((h - 4 * 32 - 3 * 12) / 2 - 52), 2.0f,
-                 "SELECT EPISODE", kMenuAccent);
+        add_centered(out, w,
+                     static_cast<float>((h - 4 * 32 - 3 * 12) / 2 - 52),
+                     2.0f, "SELECT EPISODE", kMenuAccent);
         std::array<MenuLayout, 4> lay;
         layout_episode_items(w, h, lay);
         for (int i = 0; i < SceneState::kEpisodeCount; ++i) {
@@ -126,23 +136,19 @@ void build_menu(const SceneState& s, int w, int h, MenuDraw& out) {
             add_box_text(out, lay[i].x, lay[i].y, lay[i].w, lay[i].h,
                          SceneState::kEpisodes[i].name, flags);
         }
-        add_text(out, static_cast<float>(center_x(w, 28, 1)),
-                 static_cast<float>(h - 40), 1.0f,
-                 "ENTER = START   ESC = BACK", 0u);
+        add_centered(out, w, static_cast<float>(h - 40), 1.0f,
+                     "ENTER = START   ESC = BACK", 0u);
         break;
     }
     case Scene::LevelIntro: {
         char title[32];
         std::snprintf(title, sizeof(title), "LEVEL %d", s.level() + 1);
-        const int tl = static_cast<int>(std::strlen(title));
-        add_text(out, static_cast<float>(center_x(w, tl, 3)),
-                 static_cast<float>(h / 2 - 56), 3.0f, title, kMenuAccent);
-        add_text(out, static_cast<float>(center_x(w, 36, 1)),
-                 static_cast<float>(h / 2 + 8), 1.0f,
-                 SceneState::kEpisodes[s.episode()].name, 0u);
-        add_text(out, static_cast<float>(center_x(w, 22, 1)),
-                 static_cast<float>(h / 2 + 44), 1.0f,
-                 "PRESS ANY KEY TO BEGIN", 0u);
+        add_centered(out, w, static_cast<float>(h / 2 - 56), 3.0f, title,
+                     kMenuAccent);
+        add_centered(out, w, static_cast<float>(h / 2 + 8), 1.0f,
+                     SceneState::kEpisodes[s.episode()].name, 0u);
+        add_centered(out, w, static_cast<float>(h / 2 + 44), 1.0f,
+                     "PRESS ANY KEY TO BEGIN", 0u);
         break;
     }
     case Scene::Game:

@@ -176,9 +176,23 @@ void test_menu_layout() {
         if (d.els[i].flags & kMenuSelected)
             selected = static_cast<int>(i);
     CHECK(selected == 1);  // element 0 is the heading; items are 1..4
+    // Every centered run sits exactly at (w - len*8*scale) / 2 — guards
+    // the hard-coded-width drift class (see add_centered in menu.cpp).
+    for (std::uint32_t i = 0; i < d.count; ++i) {
+        if (d.els[i].flags & kMenuBox)
+            continue;  // box text is left-padded, not centered
+        const int len = static_cast<int>(d.els[i].len);
+        const int sc = static_cast<int>(d.els[i].scale);
+        CHECK(d.els[i].tx == (640 - len * 8 * sc) / 2);
+    }
     keydown(s, "return");
     build_menu(s, 640, 400, d);
     CHECK(d.count == 3);  // level intro
+    for (std::uint32_t i = 0; i < d.count; ++i) {
+        const int len = static_cast<int>(d.els[i].len);
+        const int sc = static_cast<int>(d.els[i].scale);
+        CHECK(d.els[i].tx == (640 - len * 8 * sc) / 2);
+    }
 }
 
 void test_game_stub_and_hooks() {
