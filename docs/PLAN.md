@@ -138,7 +138,10 @@ docs/        plan, format write-ups
    config. Full plan: docs/phase-5-plan.md (planned 2026-11-14; decisions
    1-5 CONFIRMED by user: hybrid UI, internal res 1x-4x with 1x authentic
    default, rebind UI + standard gamepad mapping with Steam Deck support,
-   versioned JSON config, audio settings + device picker).
+   versioned JSON config, audio settings + device picker; WS4 kickoff
+   decisions confirmed 2026-11-16 as recommended). Progress: WS1 DONE
+   fba657c, WS2 DONE 13d1bc5 + a93a1e2, WS3 DONE f508bdd, WS4 DONE
+   (config + options/pause scenes, 2026-11-16); next WS5 audio device.
    ACCEPT: full play loop of one episode start->death->restart, menus
    usable with keyboard AND gamepad, settings (incl. rebinds and internal
    resolution) survive a restart.

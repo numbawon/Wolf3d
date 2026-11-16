@@ -69,16 +69,36 @@ static_assert(sizeof(MenuDraw) == 1320);
 // Geometry of one menu item, logical px.
 struct MenuLayout {
     int x, y, w, h;
+    bool operator==(const MenuLayout& o) const {
+        return x == o.x && y == o.y && w == o.w && h == o.h;
+    }
 };
 
-// Episode-item layout for a window of (w, h): four 420x32 boxes, 12 px
-// apart, centered. Shared by the render pass and the mouse hit-test so
-// what the cursor sees is what the cursor picks.
+// Vertical list of 420x32 boxes (the episode-list geometry), `count` of
+// them (1..4), 12 px apart, horizontally centered, top offset `top` below
+// the vertical center. Shared by the render pass and the mouse hit-test
+// so what the cursor sees is what the cursor picks.
+void layout_v_items(int w, int h, int count, int top,
+                    std::array<MenuLayout, 4>& out);
+// Episode-item layout for a window of (w, h): four boxes (the original
+// geometry — layout_v_items with count 4, top 28).
 void layout_episode_items(int w, int h,
                           std::array<MenuLayout, 4>& out);
 // -1 if (mx, my) is outside every box.
+[[nodiscard]] int hit_v_items(const std::array<MenuLayout, 4>& lay,
+                              int count, int mx, int my);
 [[nodiscard]] int hit_episode_item(const std::array<MenuLayout, 4>& lay,
                                    int mx, int my);
+
+// Options screen (WS4): four tab labels across the top, up to 5 option
+// rows below. Row count per tab is SceneState::kOptTabRows.
+struct OptionsLayout {
+    MenuLayout tabs[4];
+    MenuLayout rows[5];
+};
+void layout_options(int w, int h, OptionsLayout& out);
+[[nodiscard]] int hit_options_tab(const OptionsLayout& lay, int mx, int my);
+[[nodiscard]] int hit_options_row(const OptionsLayout& lay, int mx, int my);
 
 // Compose the menu frame for the current scene (count = 0 for Game — the
 // app renders the 3D frame instead).

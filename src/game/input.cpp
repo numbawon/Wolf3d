@@ -61,7 +61,11 @@ void LiveInput::on_key(const char* key, bool down) {
     }
 }
 
-void LiveInput::on_mouse(double xrel) { dx_ += xrel; }
+void LiveInput::set_sensitivity(double s) {
+    sensitivity_ = s > 0.0 ? s : 1.0;
+}
+
+void LiveInput::on_mouse(double xrel) { dx_ += xrel * sensitivity_; }
 
 void LiveInput::shoot() { shoot_ = true; }
 

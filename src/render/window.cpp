@@ -59,6 +59,79 @@ FullscreenMode Window::fullscreen_mode() const {
                                                 : FullscreenMode::Borderless;
 }
 
+FullscreenMode Window::enter_borderless() {
+    // From exclusive, exit to windowed first: the stored fullscreen mode
+    // persists across SetWindowFullscreen(false) and would make the
+    // re-entry exclusive.
+    if (fullscreen_mode() == FullscreenMode::Exclusive) {
+        SDL_SetWindowFullscreen(window_, false);
+        SDL_SyncWindow(window_);
+    }
+    // Clear any stored exclusive mode (it persists after leaving
+    // fullscreen) so SetWindowFullscreen(true) enters borderless.
+    SDL_SetWindowFullscreenMode(window_, nullptr);
+    if (!SDL_SetWindowFullscreen(window_, true)) {
+        std::fprintf(stderr, "w3d: borderless fullscreen failed (%s), "
+                             "staying windowed\n",
+                     SDL_GetError());
+        return FullscreenMode::Windowed;
+    }
+    SDL_SyncWindow(window_);
+    return fullscreen_mode();
+}
+
+bool Window::enter_exclusive() {
+    // Called while already in borderless fullscreen (SDL3: setting the
+    // mode while fullscreen switches the kind, asynchronously).
+    if (exclusive_unavailable_) {
+        std::fprintf(stderr,
+                     "w3d: exclusive fullscreen not available (latched); "
+                     "staying %s\n",
+                     fullscreen_mode() == FullscreenMode::Borderless
+                         ? "borderless"
+                         : "windowed");
+        return false;
+    }
+    const SDL_DisplayID disp = SDL_GetDisplayForWindow(window_);
+    bool ok = false;
+    SDL_DisplayMode** modes = nullptr;
+    int n = 0;
+    if (disp)
+        modes = SDL_GetFullscreenDisplayModes(disp, &n);
+    if (modes && n > 0) {
+        // The list is sorted largest-first; prefer a mode matching the
+        // desktop size (no visible change for the player), else the
+        // largest.
+        const SDL_DisplayMode* want = modes[0];
+        const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(disp);
+        for (int i = 0; i < n; ++i) {
+            if (desktop && modes[i]->w == desktop->w &&
+                modes[i]->h == desktop->h) {
+                want = modes[i];
+                break;
+            }
+        }
+        ok = SDL_SetWindowFullscreenMode(window_, want);
+    }
+    if (modes)
+        SDL_free(modes);
+    if (ok)
+        SDL_SyncWindow(window_);  // the switch is async; block on it
+    if (ok && fullscreen_mode() == FullscreenMode::Exclusive) {
+        exclusive_unavailable_ = false;  // it works; drop the latch
+        return true;
+    }
+    // Exclusive not available on this driver: latch it and degrade.
+    exclusive_unavailable_ = true;
+    std::fprintf(stderr,
+                 "w3d: exclusive fullscreen not available (%s); "
+                 "falling back to borderless<->windowed\n",
+                 SDL_GetError());
+    SDL_SetWindowFullscreen(window_, false);
+    SDL_SyncWindow(window_);
+    return false;
+}
+
 FullscreenMode Window::cycle_fullscreen() {
     // SDL3 semantics verified on this platform (probe: scratch
     // w3d_ref/probe_fs.cpp, Nov 2026):
@@ -66,8 +139,8 @@ FullscreenMode Window::cycle_fullscreen() {
     //     window's *stored* fullscreen mode (NULL = borderless/desktop);
     //   - SDL_SetWindowFullscreen(win, false) exits to windowed (original
     //     size/position restored);
-    //   - SDL_SetWindowFullscreenMode(win, mode) only sets the stored mode;
-    //     called while already fullscreen it switches the mode
+    //   - SDL_SetWindowFullscreenMode(win, mode) only sets the stored
+    //     mode; called while already fullscreen it switches the mode
     //     asynchronously (borderless <-> exclusive);
     //   - SDL_SetWindowFullscreenMode(win, nullptr) alone is a silent
     //     no-op (returns success, never changes state) — do not rely on
@@ -78,71 +151,37 @@ FullscreenMode Window::cycle_fullscreen() {
     const auto cur = fullscreen_mode();
     switch (cur) {
         case FullscreenMode::Windowed:
-            // Clear any stored exclusive mode (it persists after leaving
-            // fullscreen) so SetWindowFullscreen(true) enters borderless.
-            SDL_SetWindowFullscreenMode(window_, nullptr);
-            if (!SDL_SetWindowFullscreen(window_, true)) {
-                std::fprintf(stderr,
-                             "w3d: borderless fullscreen failed (%s), "
-                             "staying windowed\n",
-                             SDL_GetError());
-                return FullscreenMode::Windowed;
-            }
-            SDL_SyncWindow(window_);
-            return FullscreenMode::Borderless;
+            return enter_borderless();
         case FullscreenMode::Borderless: {
-            if (exclusive_unavailable_) {
-                // Exclusive was unavailable; the cycle degrades to
-                // windowed<->borderless (logged once at the failed probe).
-                SDL_SetWindowFullscreen(window_, false);
-                SDL_SyncWindow(window_);
-                return FullscreenMode::Windowed;
-            }
-            const SDL_DisplayID disp = SDL_GetDisplayForWindow(window_);
-            bool ok = false;
-            SDL_DisplayMode** modes = nullptr;
-            int n = 0;
-            if (disp)
-                modes = SDL_GetFullscreenDisplayModes(disp, &n);
-            if (modes && n > 0) {
-                // The list is sorted largest-first; prefer a mode matching
-                // the desktop size (no visible change for the player),
-                // else the largest.
-                const SDL_DisplayMode* want = modes[0];
-                const SDL_DisplayMode* desktop =
-                    SDL_GetDesktopDisplayMode(disp);
-                for (int i = 0; i < n; ++i) {
-                    if (desktop && modes[i]->w == desktop->w &&
-                        modes[i]->h == desktop->h) {
-                        want = modes[i];
-                        break;
-                    }
-                }
-                ok = SDL_SetWindowFullscreenMode(window_, want);
-            }
-            if (modes)
-                SDL_free(modes);
-            if (ok)
-                SDL_SyncWindow(window_);  // the switch is async; block on it
-            if (ok && fullscreen_mode() == FullscreenMode::Exclusive) {
-                exclusive_unavailable_ = false;  // it works; drop the latch
+            if (enter_exclusive())
                 return FullscreenMode::Exclusive;
-            }
-            // Exclusive not available on this driver: latch it and degrade
-            // the cycle to windowed<->borderless.
-            exclusive_unavailable_ = true;
-            std::fprintf(stderr,
-                         "w3d: exclusive fullscreen not available (%s); "
-                         "F11 now cycles windowed<->borderless\n",
-                         SDL_GetError());
-            SDL_SetWindowFullscreen(window_, false);
-            SDL_SyncWindow(window_);
-            return FullscreenMode::Windowed;
+            return FullscreenMode::Windowed;  // enter_exclusive exited
         }
         case FullscreenMode::Exclusive:
             SDL_SetWindowFullscreen(window_, false);
             SDL_SyncWindow(window_);
             return FullscreenMode::Windowed;
+    }
+    return cur;
+}
+
+FullscreenMode Window::set_fullscreen(FullscreenMode want) {
+    const auto cur = fullscreen_mode();
+    if (cur == want)
+        return want;
+    switch (want) {
+        case FullscreenMode::Windowed:
+            SDL_SetWindowFullscreen(window_, false);
+            SDL_SyncWindow(window_);
+            return fullscreen_mode();
+        case FullscreenMode::Borderless:
+            return enter_borderless();
+        case FullscreenMode::Exclusive:
+            if (cur != FullscreenMode::Borderless)
+                enter_borderless();  // exclusive switches FROM borderless
+            if (enter_exclusive())
+                return FullscreenMode::Exclusive;
+            return fullscreen_mode();  // degraded; report the truth
     }
     return cur;
 }

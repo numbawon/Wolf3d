@@ -17,8 +17,18 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   Bench (N1X, scripted 4000 frames, last second): S=1 ~1600 fps,
   S=2 ~735, S=3 ~517, S=4 ~323 — 4x is ~5x the cost of 1x, sublinear in
   pixel count; all well above 60.
-- NEXT: WS4 — config (JSON writer/parser, load/save, live-apply; options
-  screen sections).
+- WS4 (config + options/pause scenes) DONE 2026-11-16 (this workstream's
+  commit) — src/app/config.* (pure C++ v1 JSON schema, strict parser +
+  tolerant mapping, deterministic writer, load/save, CLI overrides),
+  Scene::Pause + Scene::Options (4 tabs; live-apply of video/sensitivity,
+  stored-only audio + difficulty with PENDING markers), save-on-change +
+  clean-exit save for interactive runs only. 7 suites green (2464 checks)
+  incl. new w3d_config_tests (97) + rewritten w3d_scene_tests (201).
+  Evidence: scratch/w3d_ref ws4_title/ws4_pause/ws4_opt0..3.bmp (by eye);
+  first-boot interactive run wrote the default config; harness runs write
+  nothing.
+- NEXT: WS5 — audio device (miniaudio): pull callback, music loop, SFX
+  voices, wire the stored audio settings (volumes/music_on/device).
 Decisions confirmed by user 2026-11-14: 1, 4, 5 as
 recommended; 2 REVISED (configurable internal resolution 1x-4x instead of
 320x200-strict); 3 REVISED (keyboard rebind UI in P5 + standard gamepad
@@ -367,7 +377,65 @@ Rebind UI (Controls section of options, full-res modern):
      rebuild, since borderless resizes the window).
 4. Config: JSON writer/parser, load/save, live-apply hooks; options
    screen sections.
-   KICKOFF NOTES (WS4, for a fresh context window):
+   DONE 2026-11-16 (all kickoff decisions as confirmed; see notes below).
+   Implementation summary:
+   - src/app/config.{hpp,cpp}: pure C++ (no SDL/Vulkan — headless
+     testable). v1 schema (video/audio/controls/gameplay; key order
+     fixed). Hand-rolled JSON: STRICT parser (RFC 8259 shape; malformed
+     -> error + note, never a partial value) + TOLERANT mapping
+     (missing key/wrong type -> field default; out-of-range -> clamped;
+     enum by name (case-insensitive) or number; unknown keys dropped on
+     round-trip). Deterministic writer (2-space indent). load_config /
+     save_config take a CALLER-SUPPLIED path (save = <path>.tmp +
+     rename, no torn files); default_config_path() =
+     %APPDATA%\Wolf3DRemake\config.json. CliOverrides applies --res-scale
+     / --blit-filter / --no-fog for the run only and never touches the
+     file (harness determinism).
+   - scene.{hpp,cpp}: Scene::Pause + Scene::Options. Title is now a
+     3-item menu (NEW GAME / OPTIONS / QUIT; the original any-key is
+     retired per Decision 1's modern menu). Game: Esc -> Pause. Pause:
+     RESUME / OPTIONS / QUIT TO TITLE; Esc resumes. Options: 4 tabs
+     (1-4 or tab keys; mouse hover highlights, click selects, click the
+     selected row again to cycle), rows cycle with wrap; audio rows +
+     difficulty carry "(PENDING)" (stored-only: device = WS5, difficulty
+     = WS7). Esc returns to the scene that opened Options (the menu
+     restarts at its top item). from_name("options:<tab>") harness hook
+     for per-tab menu shots.
+   - Live-apply (main.cpp scene loop): on take_config_dirty() diff
+     against the applied state — res_scale, scale_filter,
+     fullscreen_mode (window.set_fullscreen; driver degradation is
+     written back so the screen follows reality), show_fps,
+     mouse_sensitivity (LiveInput multiplier, clamped 0.1..10). Audio +
+     difficulty apply nothing yet. F11 stays above the machine and
+     syncs cfg without triggering a save.
+   - window.{hpp,cpp}: public set_fullscreen() = the WS3 cycle logic as
+     enter_borderless()/enter_exclusive() (latched exclusive
+     degradation). input.{hpp,cpp}: LiveInput::set_sensitivity().
+   - Save policy: interactive runs only (no --frames / --scene /
+     --menu-shot / --script). Save on every user change + on clean exit
+     (first boot rewrites the effective defaults). CLI flags override
+     the loaded config for the run, never persisted.
+   - Tests: w3d_config_tests (tests/test_config.cpp, 97 checks):
+     parser (escapes, surrogates, malformed battery), round-trip,
+     tolerant mapping (clamps, name/number enums, wrong types,
+     unknown-key drop, version), file I/O (missing/empty/garbage/
+     partial/overwrite), CLI precedence. w3d_scene_tests rewritten
+     (201 checks): full Title/NewGame/LevelIntro/Game/Pause/Options
+     flow, mouse against the shared layout, options value cycling /
+     tabs / dirty flag / from_name hooks, MenuDraw counts + centering.
+     All 7 suites green: 2464 checks, 0 failures, 0 warnings.
+   - Evidence (scratch/w3d_ref): ws4_title.bmp, ws4_pause.bmp,
+     ws4_opt0..3.bmp (each tab, by eye: correct values, PENDING on the
+     stored-only rows, centering intact). First-boot interactive run:
+     created %APPDATA%\Wolf3DRemake\config.json with the defaults on
+     clean exit (verified by content). Harness runs (--menu-shot /
+     --scene): no config dir created (verified).
+   - Invariants held: scripted harness unchanged (legacy loop reads the
+     loaded cfg; CLI overrides fold in; render path identical); S=1
+     pixel-diff baseline untouched by this workstream; no new runtime
+     dependencies; nothing written outside %APPDATA%\Wolf3DRemake.
+   KICKOFF NOTES (WS4, superseded by the DONE summary above — kept for
+   the decision record):
    - Current state: zero persistence — all video options are CLI flags
      (main.cpp Args: --res-scale, --blit-filter, --no-fog, --win, ...).
      Scene machine (src/app/scene.*) has Title/NewGame/LevelIntro/Game +
@@ -411,12 +479,13 @@ Rebind UI (Controls section of options, full-res modern):
      SDL3 key names CAPITALIZED; one-shot command buffer for
      constructor-time GPU work; keep the menu pass on SSBOs (UBO
      256-byte alignment if anything new touches a UBO).
-   - Open items (decide at kickoff, recommendations in parens):
-     (a) audio + gameplay sections stored-only in WS4 (yes — the device
-     is WS5, difficulty applies WS7); (b) show_fps — wire in WS4 (5
-     lines: the per-second fps line already exists in both event loops)
-     and drop it from WS10 polish (yes); (c) Controls tab in WS4 —
-     sensitivity only, bindings omitted until WS9 ships the editor (yes).
+   - WS4 kickoff decisions — CONFIRMED by the user 2026-11-16 (all as
+     recommended): (a) audio + gameplay sections stored-only in WS4 (the
+     device is WS5, difficulty applies WS7); (b) show_fps wired in WS4
+     (the per-second fps line exists in both event loops; it now follows
+     video.show_fps) and dropped from WS10 polish; (c) Controls tab in
+     WS4 = mouse sensitivity only (LIVE, wired into LiveInput), bindings
+     omitted until WS9 ships the editor.
 5. Audio device: miniaudio in .build/deps; pull callback; music loop;
    SFX voices; volume/device settings wired.
 6. Gamepad: mapping table, deadzone, rumble, disconnect handling; menu
@@ -426,8 +495,9 @@ Rebind UI (Controls section of options, full-res modern):
    by res_scale); sim event queue feeding messages + SFX.
 8. Screens: level intro, score, death, episode end, high scores (persist).
 9. Rebind UI: action list, capture state, conflict rules, reset, persist.
-10. Polish within scope: F12 screenshot (stb_image_write), show-FPS,
-    difficulty semantics, episode select names.
+10. Polish within scope: F12 screenshot (stb_image_write), difficulty
+    semantics, episode select names. (show-FPS moved to WS4 per the
+    2026-11-16 kickoff decision.)
 11. Tests + acceptance (below). Keep all 659 existing checks green.
 
 Suggested branch: phase-5-ui-hud (naming convention: no acronyms —

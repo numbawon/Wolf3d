@@ -97,6 +97,7 @@ struct Args {
     std::string scene_start;
     std::string menu_shot;
     uint32_t res_scale = 1;  // internal render scale 1..4 (WS3)
+    bool res_scale_given = false;  // WS4: CLI override flag tracking
     std::string dump_atlas;  // WS3 debug: dump GPU buffers after the shot
     std::string win_size;    // WS3: initial window "WxH" (default 640x400)
     std::string blit_filter; // WS3: linear | nearest | integer (window blit)
@@ -130,6 +131,7 @@ Args parse_args(int argc, char** argv) {
             a.menu_shot = argv[++i];
         } else if (std::strcmp(argv[i], "--res-scale") == 0 && i + 1 < argc) {
             a.res_scale = static_cast<uint32_t>(std::stoul(argv[++i]));
+            a.res_scale_given = true;
         } else if (std::strcmp(argv[i], "--dump-atlas") == 0 && i + 1 < argc) {
             a.dump_atlas = argv[++i];
         } else if (std::strcmp(argv[i], "--win") == 0 && i + 1 < argc) {
@@ -353,6 +355,37 @@ int main(int argc, char** argv) {
         opt_level.emplace(std::move(level));
     }
 
+    // ---- Config (WS4): load once, CLI flags override for this run.
+    // Flags NEVER write the file (the scripted harness stays
+    // deterministic); the scene loop saves on change / on clean exit.
+    const auto cfg_path = w3d::app::default_config_path();
+    const auto load_res = w3d::app::load_config(cfg_path);
+    w3d::app::Config cfg = load_res.cfg;
+    if (!load_res.file_valid)
+        std::fprintf(stderr, "w3d: %s\n", load_res.note.c_str());
+    {
+        w3d::app::CliOverrides cli;
+        if (args.res_scale_given) {
+            cli.has_res_scale = true;
+            cli.res_scale = static_cast<int>(args.res_scale);
+        }
+        if (!args.blit_filter.empty()) {
+            cli.has_scale_filter = true;
+            cli.scale_filter = w3d::app::cfgname::scale_filter(
+                args.blit_filter);
+        }
+        if (args.no_fog) {
+            cli.has_fog = true;
+            cli.fog = false;
+        }
+        w3d::app::apply_cli_overrides(cfg, cli);
+    }
+    // Interactive = the user drives the menus (not a harness run). Only
+    // interactive scene-mode runs ever write the config file.
+    const bool interactive =
+        args.frames == 0 && args.scene_start.empty() &&
+        args.menu_shot.empty() && args.script.empty();
+
     // ---- Window + renderer
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "w3d: SDL_Init failed: %s\n", SDL_GetError());
@@ -369,11 +402,25 @@ int main(int argc, char** argv) {
         parse_win_size(args.win_size, win_w, win_h);
         Window window(win_w, win_h, "wolf3d (phase 5)", instance, flags);
         Renderer renderer(window, instance);
-        renderer.set_res_scale(args.res_scale);
-        if (args.blit_filter == "nearest")
+        // Video settings: config (with CLI overrides) is the source of
+        // truth for this run.
+        renderer.set_res_scale(static_cast<uint32_t>(cfg.video.res_scale));
+        if (cfg.video.scale_filter == 1)
             renderer.set_blit_filter(w3d::render::BlitFilter::Nearest);
-        else if (args.blit_filter == "integer")
+        else if (cfg.video.scale_filter == 2)
             renderer.set_blit_filter(w3d::render::BlitFilter::Integer);
+        else
+            renderer.set_blit_filter(w3d::render::BlitFilter::Linear);
+        if (cfg.video.fullscreen_mode != 0) {
+            const auto m = window.set_fullscreen(
+                static_cast<w3d::render::FullscreenMode>(
+                    cfg.video.fullscreen_mode));
+            std::fprintf(stderr, "w3d: display mode: %s\n",
+                         fullscreen_mode_name(m));
+            // A driver that can't do exclusive reports the degraded mode;
+            // the run follows reality.
+            cfg.video.fullscreen_mode = static_cast<int>(m);
+        }
 
         // Static atlases from the VSWAP banks.
         {
@@ -404,6 +451,12 @@ int main(int argc, char** argv) {
         std::uint64_t fps_last = SDL_GetTicks();
         uint32_t fps_frames = 0;
         bool quit = false;
+        // WS4: the per-second fps line follows video.show_fps; fog follows
+        // gameplay.fog (CLI --no-fog already folded into cfg above). The
+        // scene loop may update both (live-apply); the legacy loop reads
+        // them.
+        bool show_fps = cfg.video.show_fps;
+        bool fog_on = cfg.gameplay.fog;
         if (legacy) {
             Simulation sim(std::move(*opt_level));
         while (!quit) {
@@ -472,7 +525,7 @@ int main(int argc, char** argv) {
                                      args.frames != 0 &&
                                      frame_idx == args.frames - 1;
             if (renderer.begin_frame()) {
-                renderer.render_frame(frame, palette, do_shot, !args.no_fog,
+                renderer.render_frame(frame, palette, do_shot, fog_on,
                                       do_win_shot);
                 renderer.present();
                 if (do_shot) {
@@ -513,7 +566,7 @@ int main(int argc, char** argv) {
                 quit = true;
             }
             frame_idx++;
-            {
+            if (show_fps) {
                 const std::uint64_t now = SDL_GetTicks();
                 if (now - fps_last >= 1000) {
                     std::printf("w3d: %d fps\n",
@@ -535,6 +588,9 @@ int main(int argc, char** argv) {
             w3d::app::SceneState scene = args.scene_start.empty()
                 ? w3d::app::SceneState()
                 : w3d::app::SceneState::from_name(args.scene_start);
+            // WS4: the machine owns the settings the options screen edits.
+            scene.set_config(cfg);
+            live.set_sensitivity(cfg.controls.mouse_sensitivity);
             std::unique_ptr<Simulation> scene_sim;
             int scene_sim_level = -1;
             auto ensure_sim = [&]() {
@@ -553,6 +609,11 @@ int main(int argc, char** argv) {
                 prev_weapon_cooldown = 0;
             };
             bool was_in_game = false;
+            // WS4 live-apply state: what the renderer/window actually run
+            // on. After the machine reports a change we diff against this
+            // and touch only what moved.
+            w3d::app::Config applied = cfg;
+            bool cfg_touched = false;
             while (!quit) {
                 // SDL events: routed to the scene machine, or to live
                 // input while in the Game scene.
@@ -569,6 +630,13 @@ int main(int argc, char** argv) {
                             const auto m = window.cycle_fullscreen();
                             std::fprintf(stderr, "w3d: display mode: %s\n",
                                          fullscreen_mode_name(m));
+                            // Keep the settings (and the options screen)
+                            // in step with reality; not a user edit, so
+                            // no save is triggered.
+                            scene.cfg().video.fullscreen_mode =
+                                static_cast<int>(m);
+                            applied.video.fullscreen_mode =
+                                static_cast<int>(m);
                             continue;
                         }
                         const char* raw = SDL_GetKeyName(ev.key.key);
@@ -628,6 +696,60 @@ int main(int argc, char** argv) {
                     SDL_SetWindowRelativeMouseMode(window.window(), false);
                 was_in_game = in_game;
 
+                // WS4 live-apply: the options screen changed a value.
+                if (scene.take_config_dirty()) {
+                    cfg_touched = true;
+                    const auto& nc = scene.cfg();
+                    if (nc.video.res_scale != applied.video.res_scale)
+                        renderer.set_res_scale(nc.video.res_scale);
+                    if (nc.video.scale_filter !=
+                        applied.video.scale_filter) {
+                        if (nc.video.scale_filter == 1)
+                            renderer.set_blit_filter(
+                                w3d::render::BlitFilter::Nearest);
+                        else if (nc.video.scale_filter == 2)
+                            renderer.set_blit_filter(
+                                w3d::render::BlitFilter::Integer);
+                        else
+                            renderer.set_blit_filter(
+                                w3d::render::BlitFilter::Linear);
+                    }
+                    if (nc.video.fullscreen_mode !=
+                        applied.video.fullscreen_mode) {
+                        const auto m = window.set_fullscreen(
+                            static_cast<w3d::render::FullscreenMode>(
+                                nc.video.fullscreen_mode));
+                        std::fprintf(stderr, "w3d: display mode: %s\n",
+                                     fullscreen_mode_name(m));
+                        if (m != static_cast<w3d::render::FullscreenMode>(
+                                     nc.video.fullscreen_mode)) {
+                            // The driver degraded the request (e.g. no
+                            // exclusive): the screen follows reality; the
+                            // correction rides the next save.
+                            scene.cfg().video.fullscreen_mode =
+                                static_cast<int>(m);
+                        }
+                    }
+                    if (nc.video.show_fps != applied.video.show_fps)
+                        show_fps = nc.video.show_fps;
+                    if (nc.controls.mouse_sensitivity !=
+                        applied.controls.mouse_sensitivity)
+                        live.set_sensitivity(nc.controls.mouse_sensitivity);
+                    if (nc.gameplay.fog != applied.gameplay.fog)
+                        fog_on = nc.gameplay.fog;
+                    // Audio + difficulty are stored-only (WS5/WS7) —
+                    // nothing to apply live.
+                    if (interactive) {
+                        std::string serr;
+                        if (!w3d::app::save_config(cfg_path, scene.cfg(),
+                                                   serr))
+                            std::fprintf(stderr,
+                                         "w3d: config save failed: %s\n",
+                                         serr.c_str());
+                    }
+                    applied = scene.cfg();
+                }
+
                 if (renderer.begin_frame()) {
                     if (in_game) {
                         // The Phase 3 pipeline, driven by the scene's sim.
@@ -645,8 +767,7 @@ int main(int argc, char** argv) {
                         prev_snap_count = frame.actor_snap_count;
                         w3d::render::update_flash(flash, frame.flash_event);
                         w3d::render::effective_palette(flash, palette);
-                        renderer.render_frame(frame, palette, false,
-                                              !args.no_fog);
+                        renderer.render_frame(frame, palette, false, fog_on);
                     } else {
                         uint32_t mw = 0, mh = 0;
                         renderer.swapchain_size(mw, mh);
@@ -677,7 +798,7 @@ int main(int argc, char** argv) {
                     quit = true;
                 }
                 frame_idx++;
-                {
+                if (show_fps) {
                     const std::uint64_t now = SDL_GetTicks();
                     if (now - fps_last >= 1000) {
                         std::printf("w3d: %d fps\n",
@@ -689,6 +810,16 @@ int main(int argc, char** argv) {
                     }
                 }
                 SDL_Delay(16);  // ~60 Hz
+            }
+            // WS4: clean-exit save — covers the first run (missing or
+            // corrupt file: rewrite the effective defaults) and any change
+            // the per-change save could not flush. Harness runs never
+            // write the file.
+            if (interactive && (cfg_touched || !load_res.file_valid)) {
+                std::string serr;
+                if (!w3d::app::save_config(cfg_path, scene.cfg(), serr))
+                    std::fprintf(stderr, "w3d: config save failed: %s\n",
+                                 serr.c_str());
             }
         }
     }

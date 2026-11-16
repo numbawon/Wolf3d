@@ -72,12 +72,13 @@ else()
   target_compile_options(w3d_audio PRIVATE -Wall -Wextra)
 endif()
 
-# Phase 5: UI — scene state machine + full-res menu model (WS2). Pure C++
-# (no SDL / Vulkan) so it is testable headless; the renderer consumes
-# app/menu.hpp (POD, std430-matched) and app/font8x16.inc.
+# Phase 5: UI — scene state machine + full-res menu model (WS2) + config
+# (WS4). Pure C++ (no SDL / Vulkan) so it is testable headless; the
+# renderer consumes app/menu.hpp (POD, std430-matched) and app/font8x16.inc.
 add_library(w3d_appui STATIC
     src/app/scene.cpp
-    src/app/menu.cpp)
+    src/app/menu.cpp
+    src/app/config.cpp)
 target_include_directories(w3d_appui PUBLIC src)
 if(MSVC)
   target_compile_options(w3d_appui PRIVATE /W4 /permissive- /utf-8)
@@ -120,6 +121,14 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_scene_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME scene COMMAND w3d_scene_tests)
+
+  # WS4: config JSON parse/serialize, tolerance, file I/O, CLI precedence.
+  add_executable(w3d_config_tests tests/test_config.cpp)
+  target_link_libraries(w3d_config_tests PRIVATE w3d_appui)
+  if(MSVC)
+    target_compile_options(w3d_config_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME config COMMAND w3d_config_tests)
 
   add_executable(w3d_scale_tests tests/test_scale.cpp)
   target_link_libraries(w3d_scale_tests PRIVATE w3d_render w3d_game)

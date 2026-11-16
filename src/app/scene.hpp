@@ -5,10 +5,16 @@
 // and the renderer live in the app; this machine only tracks where in the
 // Title -> NewGame -> LevelIntro -> Game flow the player is.
 //
-// WS2 skeleton flow (the full screen set — pause, score, death, episode
-// end, high scores — lands in later workstreams):
-//   Title -> NewGame (episode select) -> LevelIntro -> Game (stub)
-//   Game: Esc -> Title.  Title: Esc -> quit (app checks quit_requested()).
+// WS2 skeleton flow (the full screen set — score, death, episode end, high
+// scores — lands in later workstreams); WS4 adds the settings flow:
+//   Title (menu: New Game / Options / Quit)
+//   Title -> NewGame (episode select) -> LevelIntro -> Game
+//   Game: Esc -> Pause.  Pause: Esc/Enter -> Game (resume),
+//     item Options -> Options, item Quit to Title -> Title.
+//   Options (tabs Video/Audio/Controls/Gameplay, live-apply on change;
+//     owned settings are persisted by the app when it sees cfg_dirty):
+//     Esc -> back to the scene it was opened from (Title or Pause).
+//   Title: Esc or the Quit item -> quit (app checks quit_requested()).
 //
 // Menu navigation: keyboard (arrows / W-S-A-D move, Enter confirms, Esc
 // backs out) and mouse (hover selects, left click confirms) drive the
@@ -19,9 +25,11 @@
 #include <cstdint>
 #include <string>
 
+#include "app/config.hpp"
+
 namespace w3d::app {
 
-enum class Scene { Title, NewGame, LevelIntro, Game };
+enum class Scene { Title, NewGame, LevelIntro, Game, Pause, Options };
 
 // One discrete input event.
 struct InputEvent {
@@ -55,6 +63,23 @@ class SceneState {
     [[nodiscard]] int level() const { return level_; }  // 0-based map index
     [[nodiscard]] bool quit_requested() const { return quit_; }
 
+    // ---- Settings (WS4): the machine owns the Config the options screen
+    // edits; the app loads it in once, diffs after take_config_dirty(),
+    // live-applies the changed fields, and persists the file.
+    [[nodiscard]] const Config& cfg() const { return cfg_; }
+    [[nodiscard]] Config& cfg() { return cfg_; }
+    void set_config(const Config& c) { cfg_ = c; }
+    // True once after every user value change; reading it clears the flag.
+    [[nodiscard]] bool take_config_dirty();
+    // Options screen state (tab 0=Video 1=Audio 2=Controls 3=Gameplay).
+    [[nodiscard]] int opt_tab() const { return opt_tab_; }
+    [[nodiscard]] int opt_sel() const { return opt_sel_; }
+    [[nodiscard]] int opt_hover() const { return opt_hover_; }
+    [[nodiscard]] int opt_tab_hover() const { return opt_tab_hover_; }
+    [[nodiscard]] Scene opt_return() const { return opt_return_; }
+    // Rows per options tab (must match menu.cpp's row composition).
+    static constexpr int kOptTabRows[4] = {4, 5, 1, 2};
+
     // Navigate the episode list (wraps). `i` is clamped to range.
     void move_selection(int delta);
     void set_selection(int i);
@@ -73,14 +98,26 @@ class SceneState {
 
   private:
     void confirm_episode();
+    void switch_opt_tab(int t);
+    void cycle_option(int dir);
+    void open_options_from(Scene from);
 
     Scene scene_ = Scene::Title;
-    int sel_ = 0;       // selected episode (NewGame)
-    int hover_ = -1;    // hovered episode under the mouse, -1 = none
+    int sel_ = 0;       // selected item (Title / NewGame / Pause menus)
+    int hover_ = -1;    // hovered item under the mouse, -1 = none
     int episode_ = 0;   // confirmed episode
     int level_ = 0;     // level for LevelIntro / Game
     bool quit_ = false;
     int win_w_ = 640, win_h_ = 400;
+
+    // WS4 settings state.
+    Config cfg_;
+    bool cfg_dirty_ = false;
+    int opt_tab_ = 0;
+    int opt_sel_ = 0;
+    int opt_hover_ = -1;
+    int opt_tab_hover_ = -1;
+    Scene opt_return_ = Scene::Title;
 };
 
 }  // namespace w3d::app

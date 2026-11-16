@@ -32,6 +32,10 @@ inline constexpr std::uint8_t kFwd = 1, kBwd = 2, kLeft = 4, kRight = 8,
 class LiveInput {
   public:
     void on_key(const char* key, bool down);
+    // Multiplier on relative mouse x (WS4: the controls.mouse_sensitivity
+    // setting, live-applied; 1.0 = the original per-pixel behavior).
+    void set_sensitivity(double s);
+    [[nodiscard]] double sensitivity() const { return sensitivity_; }
     void on_mouse(double xrel);
     // Mouse button 1 pressed while the mouse is captured (original: fire).
     void shoot();
@@ -42,6 +46,7 @@ class LiveInput {
     bool shoot_ = false;
     bool activate_ = false;
     double dx_ = 0.0;
+    double sensitivity_ = 1.0;
 };
 
 }  // namespace w3d::game

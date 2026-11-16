@@ -42,6 +42,10 @@ public:
     // cycle degrades to windowed -> borderless -> windowed (logged).
     [[nodiscard]] FullscreenMode fullscreen_mode() const;
     [[nodiscard]] FullscreenMode cycle_fullscreen();
+    // WS4: jump straight to a display mode (options screen, live-apply).
+    // Returns the mode ACTUALLY in effect — if exclusive is unavailable
+    // on this driver (latched, logged), borderless or windowed instead.
+    [[nodiscard]] FullscreenMode set_fullscreen(FullscreenMode want);
 
 private:
     SDL_Window* window_ = nullptr;
@@ -52,6 +56,12 @@ private:
     // re-failing) exclusive on every press. Cleared if a later attempt
     // succeeds.
     bool exclusive_unavailable_ = false;
+    // Enters borderless (desktop) fullscreen from whatever state; returns
+    // the mode actually in effect.
+    FullscreenMode enter_borderless();
+    // Tries the exclusive switch (probes display modes, latches failure).
+    // Returns true when exclusive is in effect afterwards.
+    bool enter_exclusive();
 };
 
 } // namespace w3d::render
