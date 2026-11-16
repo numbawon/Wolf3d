@@ -1,6 +1,14 @@
 # Phase 5 Plan — UI/HUD, Menus, Settings, Input
 
-Status: PLANNED. Decisions confirmed by user 2026-11-14: 1, 4, 5 as
+Status: IN PROGRESS on branch phase-5-ui-hud.
+- WS1 (VGAGRAPH decode) DONE fba657c (docs de2582c, 2026-11-15) — see
+  docs/formats.md: Huffman 255 nodes / 4-plane 4bpp / kVgaGamepal, golden
+  tests; GOG deviations pinned (TILE8 2240 B, extern screens).
+- WS2 (scene skeleton + menus) DONE 13d1bc5 + audit a93a1e2 (2026-11-15) —
+  src/app/scene.* + menu.* + font8x16, full-res menu pass (window-sized
+  image, 1:1 blit, per Decision 1), w3d_scene_tests.
+- NEXT: WS3 — windowing + internal resolution (section 4.1 / workstream 3).
+Decisions confirmed by user 2026-11-14: 1, 4, 5 as
 recommended; 2 REVISED (configurable internal resolution 1x-4x instead of
 320x200-strict); 3 REVISED (keyboard rebind UI in P5 + standard gamepad
 mapping with Steam Deck support).
@@ -278,13 +286,41 @@ Rebind UI (Controls section of options, full-res modern):
    bitmaps; VGAHEAD = 75 index triples cross-referenced to payload).
    Verify with tile-sheet PNG dumps against original screenshots. Update
    formats.md; golden tests in tests/test_formats.cpp.
+   DONE fba657c (2026-11-15) — formats.md is authoritative; the face
+   grid / icon tile-sheets for the WS7 HUD are decoded via the same
+   decoder (VgaGraph::load), verify them against screenshots when the
+   HUD lands.
 2. Scene/state machine skeleton (src/app/): Title -> NewGame -> LevelIntro
    -> Game stub -> back; keyboard + mouse navigation; full-res menu
    render pass with embedded font.
+   DONE 13d1bc5 + audit a93a1e2 (2026-11-15) — gamepad navigation still
+   owed to WS6; Pause/LevelExit/Score/Death scenes owed to WS7/WS8.
 3. Windowing + internal resolution: offscreen target at (320*S, 200*S),
    compute dispatch change, letterbox blit, blit filters, res_scale live
    rebuild, F11 fullscreen modes, resize-safe swapchain handling.
    BENCHMARK 4x on target hardware early (16x pixel count).
+   KICKOFF NOTES (WS3, for a fresh context window):
+   - Current state: the game pass renders a FIXED 320x200 (kInternalW/H)
+     R8G8B8A8 storage image and blits it VK_FILTER_LINEAR into the
+     640x400 swapchain (render_frame in src/render/renderer.cpp). The
+     menu pass (WS2) is already window-sized and 1:1 — leave it alone.
+   - Change: parameterize the game image to (320*S, 200*S), S in 1..4,
+     rebuild offscreen target on change (no window change); blit stage
+     gains a filter (linear/nearest/integer) + 8:5 letterbox (black
+     bars, centered); F11 cycles windowed -> borderless -> (exclusive if
+     it works on ARM64, else stop at borderless).
+   - INVARIANT: at S=1 the internal frame must stay pixel-identical to
+     the Phase 3/4 baseline — the --script/--one-frame screenshot
+     harness (scratch w3d_ref workflow) must keep diffing 0/64000; 1x is
+     also the acceptance default.
+   - Bench FIRST: 4x = 16x the pixel count of 1x on the RTX Spark N1X —
+     time a 4x internal render before building the whole options path.
+   - Known driver traps still apply (skill): UBO 256-byte alignment,
+     % 256u byte extraction, float imageStore, no bool UBO members;
+     the fog table and per-column tails are already resolution-agnostic
+     (pure per-pixel math).
+   - The window today is 8:5 by coincidence — WS3 makes it a rule
+     (resizable, letterboxed, HiDPI logical px).
 4. Config: JSON writer/parser, load/save, live-apply hooks; options
    screen sections.
 5. Audio device: miniaudio in .build/deps; pull callback; music loop;
