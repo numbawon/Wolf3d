@@ -40,9 +40,9 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   the app prints one audio stats line (device, frames pulled, peak)
   as a headless smoke check. Smoke: scripted 600-tick run pulled
   73 440 frames, peak 0.456. All 7 suites green (2466 checks).
-  OPEN — verify by ear: SFX bank index mapping (kSfxMapBase/kSfxMapSod),
-  PCM SFX rate (assumed 11025 Hz), level->music table — best-guess
-  tables in main.cpp.
+  VERIFY-BY-EAR (user, 2026-11-16, interactive run): gunfire, doors,
+  per-level music CONFIRMED correct. Remaining: PCM SFX (pickups etc.) +
+  the 11025 Hz rate assumption, untested (needs a pickup on the route).
 - NEXT: WS6 — gamepad: mapping table, deadzone, rumble, disconnect
   handling; menu navigation via gamepad (verify the Steam Deck path if
   hardware available).
@@ -510,11 +510,51 @@ Rebind UI (Controls section of options, full-res modern):
    in fetch_deps.py; app/audio_device.* (pull callback, device list,
    stats line at exit); sim per-tick events -> panned SFX voices;
    level music on level entry; volumes + music_on live-applied from
-   options (device row stored-only). SFX mapping / PCM rate / music
-   table pending verify-by-ear.
+   options (device row stored-only). Verify-by-ear (2026-11-16):
+   gunfire/doors/music confirmed correct; PCM SFX untested.
 6. Gamepad: mapping table, deadzone, rumble, disconnect handling; menu
    navigation via gamepad (verify the Steam Deck path if hardware
    available).
+   KICKOFF NOTES (WS6, 2026-11-16):
+   - Baseline: ZERO gamepad code in the repo (recon 2026-11-16: no
+     SDL_INIT_GAMEPAD, no gamepad events anywhere). LiveInput
+     (src/game/input.*) aggregates keyboard+mouse into the per-tick
+     SimInput (bool move/turn bits + one-shot activate/shoot); the
+     scene machine consumes key strings + mouse in both event loops.
+     SimInput is BOOL all the way down: kSpeed/kTurnSpeed are pinned
+     per-tick constants, so there is no analog magnitude to carry.
+   - Design: extend LiveInput with on_button(code, down) / on_axis(code,
+     value). Left-stick X digitalized (deadzone 0.25) -> turn bits,
+     left-stick Y (inverted: push up = forward) -> forward/back bits,
+     OR'd into the same held_ mask as keyboard. A/B button EDGES -> the
+     same one-shot shoot/activate pipeline as key-down events (press =
+     one shot; holding does not re-fire — matches current keyboard and
+     mouse behavior; there is no hold-fire in the engine today). Start
+     handled app-level as the Esc equivalent (pause in game, back in
+     menus). Menu navigation: stick/D-pad synthesize the same key
+     events as arrows (up/down = item, left/right = tab) with repeat
+     (delay ~16 ticks, period ~8); A = Enter, B = Esc-equivalent.
+     Rumble: sim Event::Rumble -> SDL_RumbleGamepad (damage only).
+     SDL wiring in BOTH main event loops: SDL_INIT_GAMEPAD +
+     ADDED/REMOVED/AXIS_MOTION/BUTTON_DOWN/UP events; REMOVED = log +
+     clear state (keyboard keeps working). No config schema change
+     (standard mapping hardcoded; per-button gamepad rebinds stay P6
+     per the phase decision).
+   - Tests (headless, pure C++): deadzone math + stick-Y inversion,
+     button edge detection (down/up/down; no re-fire on hold),
+     gamepad+keyboard OR-merge, scene-menu navigation via synthetic
+     gamepad key events (extend w3d_scene_tests / w3d_tests).
+   - Steam Deck: standard mapping via SDL's gamepad DB; Deck layout is
+     Xbox-style so A/B/X/Y fall out automatically. Verification on a
+     Deck only if hardware is attached (it is not on this box); any
+     pad works for the local test.
+   - Decisions — PENDING user confirmation (asked in chat 2026-11-16):
+     (1) DIGITALIZED sticks: no analog movement, right stick unused
+     (no camera) [recommended]; (2) buttons: A = shoot, B = activate,
+     Start = Esc, A/B = menu select/back, D-pad + stick = menu nav
+     [recommended]; (3) rumble: damage only, no shoot rumble
+     [recommended]; (4) no config keys in WS6 (standard mapping
+     hardcoded) [recommended].
 7. HUD: face/counters/keys/level name/message line drawn on-frame (scaled
    by res_scale); sim event queue feeding messages + SFX.
 8. Screens: level intro, score, death, episode end, high scores (persist).
