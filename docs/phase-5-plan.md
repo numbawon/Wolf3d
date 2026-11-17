@@ -43,9 +43,27 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   VERIFY-BY-EAR (user, 2026-11-16, interactive run): gunfire, doors,
   per-level music CONFIRMED correct. Remaining: PCM SFX (pickups etc.) +
   the 11025 Hz rate assumption, untested (needs a pickup on the route).
-- NEXT: WS6 — gamepad: mapping table, deadzone, rumble, disconnect
-  handling; menu navigation via gamepad (verify the Steam Deck path if
-  hardware available).
+- WS6 (gamepad) DONE 89082d4 (2026-11-16) — standard mapping,
+  digitalized (kickoff decisions confirmed as recommended): left stick
+  (deadzone 0.25) = turn/move, right stick unused; A = shoot, B =
+  activate, Start = Esc (pause in game, back in menus); menus: A =
+  confirm, B/Start = back, D-pad + stick = navigation with repeat
+  (16-frame delay, 8-frame period). Damage-only rumble ->
+  SDL_RumbleGamepad (the sim's Rumble event; the sim does not emit one
+  yet — damage lands with later work). LiveInput gamepad state
+  (game/input.*, edge one-shots + digitalized stick bits OR-merged
+  into the same SimInput), app/repeat.hpp MenuRepeat (pure logic),
+  SDL wiring in the scene loop (SDL_INIT_GAMEPAD; ADDED/REMOVED/
+  AXIS_MOTION/BUTTON events). No config change (per-button gamepad
+  rebinds stay P6). ALSO FIXED A WS4 GAP: Esc in the Game scene was
+  never routed to the scene machine (every key went to LiveInput), so
+  Esc -> Pause was dead code — Esc (and Start) now reach it. Tests:
+  input_gamepad (w3d_sim_tests) + menu_repeat (w3d_scene_tests); all 7
+  suites green (2516 checks). PENDING: hardware playtest (no pad
+  attached to this box; synthetic input cannot reach SDL gamepad
+  handlers).
+- NEXT: WS7 — HUD: face/counters/keys/level name/message line drawn
+  on-frame (scaled by res_scale); sim event queue feeding messages.
 Decisions confirmed by user 2026-11-14: 1, 4, 5 as
 recommended; 2 REVISED (configurable internal resolution 1x-4x instead of
 320x200-strict); 3 REVISED (keyboard rebind UI in P5 + standard gamepad
@@ -515,7 +533,12 @@ Rebind UI (Controls section of options, full-res modern):
 6. Gamepad: mapping table, deadzone, rumble, disconnect handling; menu
    navigation via gamepad (verify the Steam Deck path if hardware
    available).
-   KICKOFF NOTES (WS6, 2026-11-16):
+   DONE 89082d4 (2026-11-16) — standard mapping (digitalized stick,
+   deadzone 0.25; A/B/Start; D-pad + stick menu nav with repeat),
+   damage-only rumble, no config keys. WS4 Esc->Pause routing gap
+   fixed. See the status line at the top; hardware playtest pending.
+   KICKOFF NOTES (WS6, superseded by the DONE summary above — kept
+   for the decision record):
    - Baseline: ZERO gamepad code in the repo (recon 2026-11-16: no
      SDL_INIT_GAMEPAD, no gamepad events anywhere). LiveInput
      (src/game/input.*) aggregates keyboard+mouse into the per-tick
