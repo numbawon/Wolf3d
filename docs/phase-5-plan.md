@@ -62,6 +62,28 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   suites green (2516 checks). PENDING: hardware playtest (no pad
   attached to this box; synthetic input cannot reach SDL gamepad
   handlers).
+- BUGFIX (pre-WS7, 2026-11-17): user report "the game isn't rendering
+  like it used to" — screenshot showed a small zoomed 3D block in the
+  left quarter plus flat ceiling/floor bands across the rest. Root
+  cause: main.cpp built the CPU frame with args.res_scale (CLI value,
+  default 1) while the renderer ran at the config's res_scale (4, set
+  via Options and saved to config.json) — columns 320..320*S were
+  unwritten default records (h = 0) that the wall pass draws as flat
+  ceiling/floor, and the 1x column/sprite geometry landed in the top-
+  left quarter of the 4x image. CLI-launched runs (with --res-scale)
+  matched by luck, which is why WS3/WS4 evidence was clean. Fix: both
+  build_frame call sites now pass renderer.res_scale() (single source
+  of truth, clamped); render_frame warns once on a scale mismatch;
+  new scale test (columns_all_written: every 320*S column has h > 0).
+  SECOND BUG FOUND WHILE DIAGNOSING: --window-shot captures came out
+  R/B-swapped — the swapchain is B8G8R8A8 but write_bmp expects RGBA
+  input; readback_window now normalizes. Verified: same-frame
+  screenshot vs window-shot are pixel-identical (0/64000 at 1:1), and
+  no-flag (config 4x) vs --res-scale 4 captures are pixel-identical
+  (0/307200 at 640x480). NOTE: rapid consecutive app runs on this box
+  intermittently hit VK_ERROR_DEVICE_LOST (-4) / partial frames (a
+  driver transient, not a code defect — re-run after ~20s). All 7
+  suites green (5716 checks).
 - NEXT: WS7 — HUD: face/counters/keys/level name/message line drawn
   on-frame (scaled by res_scale); sim event queue feeding messages.
 Decisions confirmed by user 2026-11-14: 1, 4, 5 as
