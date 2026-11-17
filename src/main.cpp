@@ -864,8 +864,21 @@ int main(int argc, char** argv) {
                         live.set_sensitivity(nc.controls.mouse_sensitivity);
                     if (nc.gameplay.fog != applied.gameplay.fog)
                         fog_on = nc.gameplay.fog;
-                    // Audio + difficulty are stored-only (WS5/WS7) —
-                    // nothing to apply live.
+                    // WS5: audio settings apply live (the device setters are
+                    // thread-safe under the mixer mutex). device_id has no
+                    // hot-switch; it applies on the next launch.
+                    if (nc.audio.master_volume != applied.audio.master_volume)
+                        audio_dev->setMasterVolume(
+                            static_cast<float>(nc.audio.master_volume) / 100.0f);
+                    if (nc.audio.music_volume != applied.audio.music_volume)
+                        audio_dev->setMusicVolume(
+                            static_cast<float>(nc.audio.music_volume) / 100.0f);
+                    if (nc.audio.sfx_volume != applied.audio.sfx_volume)
+                        audio_dev->setSfxVolume(
+                            static_cast<float>(nc.audio.sfx_volume) / 100.0f);
+                    if (nc.audio.music_on != applied.audio.music_on)
+                        audio_dev->setMusicOn(nc.audio.music_on);
+                    // difficulty is stored-only (WS7) — nothing to apply live.
                     if (interactive) {
                         std::string serr;
                         if (!w3d::app::save_config(cfg_path, scene.cfg(),

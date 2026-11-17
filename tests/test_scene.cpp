@@ -436,14 +436,32 @@ void test_options_mouse() {
     CHECK(d.count == 1 + 4 + 5 + 1);
     check_text_runs(d);
     check_centered(d, 640);
-    // The PENDING marker shows on audio rows (stored-only until WS5).
-    bool saw_pending = false;
+    // WS5: the audio rows are live (volumes + music apply at once); only
+    // OUTPUT DEVICE stays stored-only (no hot device switch) and carries
+    // the single "(PENDING)" row marker on the tab (the footer also
+    // contains the word "PENDING" — match the parenthesized marker).
+    int pending_rows = 0;
+    bool pending_on_device = false;
     for (std::uint32_t i = 0; i < d.count; ++i) {
         const char* t = reinterpret_cast<const char*>(d.els[i].text);
-        if (std::strstr(t, "PENDING"))
-            saw_pending = true;
+        if (std::strstr(t, "(PENDING)")) {
+            ++pending_rows;
+            if (std::strstr(t, "OUTPUT DEVICE"))
+                pending_on_device = true;
+        }
     }
-    CHECK(saw_pending);
+    CHECK(pending_rows == 1);
+    CHECK(pending_on_device);
+    // The video tab has no stored-only rows at all.
+    SceneState vid = SceneState::from_name("options");
+    vid.set_window(640, 400);
+    build_menu(vid, 640, 400, d);
+    int vid_pending = 0;
+    for (std::uint32_t i = 0; i < d.count; ++i)
+        if (std::strstr(reinterpret_cast<const char*>(d.els[i].text),
+                        "(PENDING)"))
+            ++vid_pending;
+    CHECK(vid_pending == 0);
     // The video tab rows carry live values.
     SceneState v2 = SceneState::from_name("options");
     v2.set_window(640, 400);

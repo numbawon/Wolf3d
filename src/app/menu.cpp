@@ -165,8 +165,8 @@ int hit_options_row(const OptionsLayout& lay, int mx, int my) {
 
 // One options row as a single monospace string: the label padded to 20
 // cells, a space, the value, and "  (PENDING)" for stored-only settings
-// (WS4: the whole Audio section + difficulty; the device list is WS5 and
-// the difficulty semantics are WS7).
+// (WS5: only the output device — there is no hot device switch, so it
+// applies on the next launch; the difficulty semantics land in WS7).
 std::string option_row_text(const SceneState& s, int tab, int row) {
     const Config& c = s.cfg();
     const char* label = "";
@@ -193,8 +193,7 @@ std::string option_row_text(const SceneState& s, int tab, int row) {
                     break;
             }
             break;
-        case 1:  // Audio (stored-only until WS5)
-            pending = true;
+        case 1:  // Audio (WS5: live; only the device is stored-only)
             switch (row) {
                 case 0:
                     label = "MASTER VOLUME";
@@ -216,6 +215,7 @@ std::string option_row_text(const SceneState& s, int tab, int row) {
                     label = "OUTPUT DEVICE";
                     value = c.audio.device_id.empty() ? "DEFAULT"
                                                       : c.audio.device_id;
+                    pending = true;  // no hot device switch; next launch
                     break;
             }
             break;

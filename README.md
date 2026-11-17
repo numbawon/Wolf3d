@@ -18,7 +18,7 @@ itself.
 | 2 | Headless game simulation (maps, actors, doors, LOS, movement) | done |
 | 3 | Vulkan compute raycaster — **pixel-perfect** vs an independent reference engine | done |
 | 4 | Audio: OPL2 FM chip + IMF sequencer + resampling/positional mixer, bit-exact vs a JS chip reference | done |
-| 5 | UI/HUD, menus, settings, input (kb + gamepad + rebinds), audio device, modern windowing | in progress on `phase-5-ui-hud` (WS1–WS4 done: VGAGRAPH decode, scene/menu skeleton, internal resolution 1x–4x + F11 fullscreen, persistent config + options/pause screens) |
+| 5 | UI/HUD, menus, settings, input (kb + gamepad + rebinds), audio device, modern windowing | in progress on `phase-5-ui-hud` (WS1–WS5 done: VGAGRAPH decode, scene/menu skeleton, internal resolution 1x–4x + F11 fullscreen, persistent config + options/pause screens, miniaudio audio device with level music + positional SFX) |
 
 The renderer has been verified **pixel-perfect** (0/64000 mismatching pixels
 per frame) against a clean-room JS reimplementation of the original render
@@ -124,7 +124,7 @@ Seven suites, run directly or via `ctest` from `.build\cmake\`:
 | `w3d_scale_tests` | internal-resolution scale math (even-column identity, sprite scaling) |
 | `w3d_window_tests` | F11 fullscreen cycle against the real display (skips when headless) |
 
-At the time of writing (Phase 5, WS4) the suites total **2 464 checks**, all
+At the time of writing (Phase 5, WS5) the suites total **2 466 checks**, all
 green. The suites grow as phases land; every phase keeps the previous
 suites green.
 
@@ -149,7 +149,8 @@ src/
            map models, audio bank, OPL2 chip, IMF sequencer
   game/    headless simulation: levels, actors, LOS, doors, live input
   audio/   audio mixer: resampling (any rate/width) + positional pan (pure C++)
-  app/     UI (Phase 5): scene state machine, menu model, config (JSON)
+  app/     UI (Phase 5): scene state machine, menu model, config (JSON),
+           miniaudio audio device (music + positional SFX pull)
   render/  SDL3 window + Vulkan: compute raycaster, blit/letterbox, menu pass
   util/    BMP writer and small helpers
 tests/     the seven suites above
