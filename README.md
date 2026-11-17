@@ -78,6 +78,17 @@ to play *Spear of Destiny* (reads the `m1/` subdirectory).
 | Pause (scene mode) / quit (harness mode) | `Esc` |
 | Cycle windowed → borderless → exclusive fullscreen | `F11` |
 
+**Gamepad** (standard mapping, Phase 5 — Steam Deck works out of the box
+via SDL's gamepad database):
+
+| Action | Pad |
+|---|---|
+| Move / turn | Left stick (digitalized, deadzone 0.25) |
+| Shoot | `A` |
+| Activate (doors, switches, …) | `B` |
+| Pause | `Start` |
+| Menu navigation | D-pad or stick; `A` = confirm, `B` / `Start` = back |
+
 Mouse turn sensitivity (scene mode, Phase 5) is configurable in the options
 screen and persisted to the config file.
 
@@ -124,7 +135,7 @@ Seven suites, run directly or via `ctest` from `.build\cmake\`:
 | `w3d_scale_tests` | internal-resolution scale math (even-column identity, sprite scaling) |
 | `w3d_window_tests` | F11 fullscreen cycle against the real display (skips when headless) |
 
-At the time of writing (Phase 5, WS5) the suites total **2 466 checks**, all
+At the time of writing (Phase 5, WS6) the suites total **2 516 checks**, all
 green. The suites grow as phases land; every phase keeps the previous
 suites green.
 

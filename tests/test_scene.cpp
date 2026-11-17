@@ -15,6 +15,7 @@
 
 #include "app/config.hpp"
 #include "app/menu.hpp"
+#include "app/repeat.hpp"
 #include "app/scene.hpp"
 
 using namespace w3d::app;
@@ -518,7 +519,58 @@ void test_game_stub_and_hooks() {
 }  // namespace
 
 // ------------------------------------------------------------ registration
+static void test_menu_repeat() {
+    g_current = "menu_repeat";
+    MenuRepeat r;
+    CHECK(r.tick(0) == 0);
+    // Press: fires immediately, repeats at frame 16, then every 8 frames.
+    int fired[40] = {0};
+    for (int i = 0; i < 40; ++i)
+        fired[i] = r.tick(kDirUp);
+    CHECK(fired[0] == kDirUp);
+    for (int i = 1; i < 16; ++i)
+        CHECK(fired[i] == kDirNone);
+    CHECK(fired[16] == kDirUp);
+    CHECK(fired[24] == kDirUp);
+    CHECK(fired[32] == kDirUp);
+    CHECK(fired[39] == kDirNone);
+    // Release fires nothing; a re-press fires immediately again.
+    CHECK(r.tick(kDirNone) == kDirNone);
+    CHECK(r.tick(kDirDown) == kDirDown);
+    // reset drops the held state.
+    r.reset();
+    CHECK(r.tick(kDirNone) == kDirNone);
+    CHECK(r.tick(kDirLeft) == kDirLeft);
+    // A mid-hold direction change fires immediately.
+    MenuRepeat r2;
+    CHECK(r2.tick(kDirUp) == kDirUp);
+    for (int i = 0; i < 5; ++i)
+        r2.tick(kDirUp);
+    CHECK(r2.tick(kDirDown) == kDirDown);
+    // The synthetic keys the repeat emits navigate a real menu.
+    SceneState t = SceneState::from_name("title");
+    t.set_window(640, 400);
+    MenuRepeat mr;
+    auto feed = [&t](int d) {
+        if (d == kDirNone)
+            return;
+        InputEvent ie;
+        ie.kind = InputEvent::KeyDown;
+        ie.key = d == kDirDown ? "down" : "up";
+        t.on_input(ie);
+    };
+    for (int i = 0; i < 16; ++i)
+        feed(mr.tick(kDirDown));  // frames 0..15: only the press fires
+    CHECK(t.selection() == 1);
+    for (int i = 0; i < 8; ++i)
+        feed(mr.tick(kDirDown));  // frame 16: the first repeat
+    CHECK(t.selection() == 2);
+    feed(mr.tick(kDirNone));
+    CHECK(t.selection() == 2);
+}
+
 static Register r_title("title_flow", test_title_flow);
+static Register r_mrep("menu_repeat", test_menu_repeat);
 static Register r_nav("episode_navigation", test_episode_navigation);
 static Register r_mouse("mouse_flow", test_mouse_flow);
 static Register r_layout("menu_layout", test_menu_layout);

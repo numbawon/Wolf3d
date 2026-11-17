@@ -548,13 +548,11 @@ Rebind UI (Controls section of options, full-res modern):
      Xbox-style so A/B/X/Y fall out automatically. Verification on a
      Deck only if hardware is attached (it is not on this box); any
      pad works for the local test.
-   - Decisions — PENDING user confirmation (asked in chat 2026-11-16):
-     (1) DIGITALIZED sticks: no analog movement, right stick unused
-     (no camera) [recommended]; (2) buttons: A = shoot, B = activate,
-     Start = Esc, A/B = menu select/back, D-pad + stick = menu nav
-     [recommended]; (3) rumble: damage only, no shoot rumble
-     [recommended]; (4) no config keys in WS6 (standard mapping
-     hardcoded) [recommended].
+   - Decisions — CONFIRMED by user 2026-11-16 (all as recommended):
+     (1) digitalized sticks, right stick unused; (2) A = shoot,
+     B = activate, Start = Esc, A/B = menu select/back, D-pad + stick
+     = menu nav; (3) damage-only rumble; (4) no config keys (standard
+     mapping hardcoded; per-button rebinds stay P6).
 7. HUD: face/counters/keys/level name/message line drawn on-frame (scaled
    by res_scale); sim event queue feeding messages + SFX.
 8. Screens: level intro, score, death, episode end, high scores (persist).

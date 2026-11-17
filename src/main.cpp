@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "app/menu.hpp"
+#include "app/repeat.hpp"
 #include "app/scene.hpp"
 #include "game/input.hpp"
 #include "game/level.hpp"
@@ -143,7 +144,8 @@ inline int music_for_level(int level, bool sod, int track_count) {
 // attenuated relative to the player.
 inline void play_sim_events(w3d::app::AudioDevice& dev,
                             const w3d::AudioBank& bank,
-                            const w3d::game::Simulation& sim, bool sod) {
+                            const w3d::game::Simulation& sim, bool sod,
+                            SDL_Gamepad* pad = nullptr) {
     using Event = w3d::game::Simulation::Event;
     constexpr double kMaxDist = 1000.0;  // cells at which the gain reaches 0
     constexpr double kNearDist = 0.5;    // closer than this: no panning
@@ -151,6 +153,20 @@ inline void play_sim_events(w3d::app::AudioDevice& dev,
     const std::size_t map_size = sizeof(kSfxMapBase) / sizeof(kSfxMapBase[0]);
     const double facing = std::atan2(sim.dy(), sim.dx());
     for (const Event& sev : sim.events()) {
+        // WS6: rumble on the connected pad (damage only).
+        if (sev.type == Event::Rumble) {
+            if (pad)
+                SDL_RumbleGamepad(
+                    pad,
+                    static_cast<std::uint16_t>(
+                        0x8000u *
+                        static_cast<unsigned>(sev.rumbleStrength)),
+                    0xC000u,
+                    sev.rumbleMs > 0
+                        ? static_cast<std::uint32_t>(sev.rumbleMs)
+                        : 100u);
+            continue;
+        }
         if (sev.type == Event::None || sev.sfxIndex < 0 ||
             static_cast<std::size_t>(sev.sfxIndex) >= map_size)
             continue;
@@ -505,7 +521,7 @@ int main(int argc, char** argv) {
     audio_dev->setMusicOn(cfg.audio.music_on);
 
     // ---- Window + renderer
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "w3d: SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -736,6 +752,11 @@ int main(int argc, char** argv) {
                     audio_dev->setMusic(&bank.music[track]);
             };
             bool was_in_game = false;
+            // WS6: gamepad (standard mapping, digitalized). `pad` tracks
+            // the connected device; `menu_rep` applies repeat to the
+            // per-frame menu direction.
+            SDL_Gamepad* pad = nullptr;
+            w3d::app::MenuRepeat menu_rep;
             // WS4 live-apply state: what the renderer/window actually run
             // on. After the machine reports a change we diff against this
             // and touch only what moved.
@@ -768,7 +789,16 @@ int main(int argc, char** argv) {
                         }
                         const char* raw = SDL_GetKeyName(ev.key.key);
                         if (scene.scene() == w3d::app::Scene::Game) {
-                            live.on_key(raw, true);
+                            // Esc routes to the scene machine (Esc ->
+                            // Pause); everything else feeds live input.
+                            if (ev.key.key == SDLK_ESCAPE) {
+                                w3d::app::InputEvent ie;
+                                ie.kind = w3d::app::InputEvent::KeyDown;
+                                ie.key = "escape";
+                                scene.on_input(ie);
+                            } else {
+                                live.on_key(raw, true);
+                            }
                         } else {
                             w3d::app::InputEvent ie;
                             ie.kind = w3d::app::InputEvent::KeyDown;
@@ -808,6 +838,64 @@ int main(int argc, char** argv) {
                             ie.my = static_cast<int>(ev.motion.y);
                             scene.on_input(ie);
                         }
+                    } else if (ev.type == SDL_EVENT_GAMEPAD_ADDED) {
+                        pad = SDL_OpenGamepad(ev.gdevice.which);
+                        if (pad)
+                            std::fprintf(stderr, "w3d: gamepad: %s\n",
+                                         SDL_GetGamepadName(pad));
+                        else
+                            std::fprintf(stderr,
+                                         "w3d: gamepad: open failed: %s\n",
+                                         SDL_GetError());
+                    } else if (ev.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                        if (pad) {
+                            SDL_CloseGamepad(pad);
+                            pad = nullptr;
+                        }
+                        live.clear_gamepad();
+                        menu_rep.reset();
+                        std::fprintf(stderr, "w3d: gamepad: removed\n");
+                    } else if (ev.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+                        // Tracked in both contexts: in the Game scene the
+                        // stick folds into the sim input (take()); out of
+                        // it the same state feeds the menu direction.
+                        // SDL3.4 axis values are Sint16 +-32767.
+                        live.on_gamepad_axis(
+                            ev.gaxis.axis,
+                            static_cast<float>(ev.gaxis.value) / 32768.0f);
+                    } else if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                        const int b = ev.gbutton.button;
+                        if (scene.scene() == w3d::app::Scene::Game) {
+                            if (b == w3d::game::gamepad::kStart) {
+                                // Start = the Esc equivalent: pause.
+                                w3d::app::InputEvent ie;
+                                ie.kind = w3d::app::InputEvent::KeyDown;
+                                ie.key = "escape";
+                                scene.on_input(ie);
+                            } else {
+                                live.on_gamepad_button(b, true);
+                            }
+                        } else if (b == w3d::game::gamepad::kSouth) {
+                            // Menus: A = confirm (Enter).
+                            w3d::app::InputEvent ie;
+                            ie.kind = w3d::app::InputEvent::KeyDown;
+                            ie.key = "return";
+                            scene.on_input(ie);
+                        } else if (b == w3d::game::gamepad::kEast ||
+                                   b == w3d::game::gamepad::kStart) {
+                            // Menus: B / Start = back (Esc).
+                            w3d::app::InputEvent ie;
+                            ie.kind = w3d::app::InputEvent::KeyDown;
+                            ie.key = "escape";
+                            scene.on_input(ie);
+                        } else if (b >= w3d::game::gamepad::kDpadUp &&
+                                   b <= w3d::game::gamepad::kDpadRight) {
+                            // D-pad: tracked for the per-frame menu
+                            // direction (live gamepad state).
+                            live.on_gamepad_button(b, true);
+                        }
+                    } else if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+                        live.on_gamepad_button(ev.gbutton.button, false);
                     }
                 }
                 if (!window_open || scene.quit_requested())
@@ -822,6 +910,26 @@ int main(int argc, char** argv) {
                     // Leaving the Game scene: release the captured mouse.
                     SDL_SetWindowRelativeMouseMode(window.window(), false);
                 was_in_game = in_game;
+
+                // WS6: gamepad menu navigation (out of the Game scene):
+                // the digitalized direction with repeat becomes synthetic
+                // key events for the scene machine.
+                if (!in_game) {
+                    const int dir = menu_rep.tick(live.gamepad_direction());
+                    if (dir != w3d::game::gamepad::kDirNone) {
+                        w3d::app::InputEvent ie;
+                        ie.kind = w3d::app::InputEvent::KeyDown;
+                        ie.key = dir == w3d::game::gamepad::kDirUp
+                                     ? "up"
+                                     : dir == w3d::game::gamepad::kDirDown
+                                           ? "down"
+                                           : dir ==
+                                                 w3d::game::gamepad::kDirLeft
+                                                 ? "left"
+                                                 : "right";
+                        scene.on_input(ie);
+                    }
+                }
 
                 // WS4 live-apply: the options screen changed a value.
                 if (scene.take_config_dirty()) {
@@ -899,9 +1007,10 @@ int main(int argc, char** argv) {
                         const SimInput in = live.take();
                         scene_sim->tick(in);
                         // WS5: consume sim events and map them to audio.
+                        // WS6: Rumble events also reach the gamepad.
                         if (audio_dev)
                             play_sim_events(*audio_dev, bank, *scene_sim,
-                                            args.sod);
+                                            args.sod, pad);
                         w3d::render::build_frame(
                             frame, *scene_sim, pre_pose, prev_snap,
                             prev_snap_count, prev_weapon_cooldown,
