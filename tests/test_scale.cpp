@@ -162,9 +162,30 @@ void test_sprites_scale() {
     }
 }
 
+// The renderer dispatches S workgroups x 320 invocations and uploads the
+// first 320*S column records, so build_frame must fill every one of them
+// for the requested scale. An unwritten record keeps the default
+// ColumnRecord (h = 0), which the wall pass draws as a flat ceiling/floor
+// column — a scale mismatch between the frame build and the dispatch used
+// to render most of the frame blank (WS7 regression test). The map is
+// wall-bounded, so every written column hits a wall/door with finite t > 0
+// and h = wall_height / (2*t) > 0: h > 0 is a clean written marker.
+void test_columns_all_written() {
+    g_current = "columns_all_written";
+    const Simulation sim = make_sim();
+    for (std::uint32_t s = 1; s <= w3d::render::kMaxScale; ++s) {
+        const Frame f = build(sim, s);
+        const int W = w3d::render::kColumns * static_cast<int>(s);
+        for (int i = 0; i < W; ++i) {
+            CHECK(f.columns[static_cast<std::size_t>(i)].h > 0.0);
+        }
+    }
+}
+
 Register r_constants("scale_constants", test_scale_constants);
 Register r_clamp("scale_clamp", test_scale_clamp);
 Register r_columns("columns_even_columns", test_columns_even_columns);
+Register r_allwritten("columns_all_written", test_columns_all_written);
 Register r_sprites("sprites_scale", test_sprites_scale);
 
 }  // namespace

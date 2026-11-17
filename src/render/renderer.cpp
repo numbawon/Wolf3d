@@ -863,6 +863,21 @@ void Renderer::render_frame(const Frame& f,
     const uint32_t W = kInternalW * S;
     const uint32_t H = kInternalH * S;
     const double mid = 100.0 * static_cast<double>(S);  // H/2
+    // Scale-mismatch guard: the frame's column/sprite records are only
+    // valid for f.scale. If the app built them at a different scale, the
+    // records beyond 320*f.scale are unwritten defaults (h = 0), which
+    // the wall pass draws as flat ceiling/floor — most of the frame goes
+    // blank. Warn once; the run stays up and the next launch after the
+    // fix is clean. (WS7: a stale CLI scale vs the config's live scale
+    // did exactly this.)
+    static bool scale_mismatch_warned = false;
+    if (f.scale != S && !scale_mismatch_warned) {
+        scale_mismatch_warned = true;
+        std::fprintf(stderr, "w3d: frame built at scale %u but the renderer "
+                             "is at scale %u; the frame will render corrupt "
+                             "(scale mismatch)\n",
+                     f.scale, S);
+    }
 
     // ---- Upload the per-frame data (host visible, permanently mapped)
     auto* base = static_cast<uint8_t*>(frame_map_);
@@ -1245,6 +1260,18 @@ bool Renderer::readback_window(std::vector<uint8_t>& out) {
     const size_t bytes = static_cast<size_t>(swap_w_) * swap_h_ * 4;
     out.resize(bytes);
     std::memcpy(out.data(), data, bytes);
+    // The swapchain surface is B8G8R8A8: the raw readback bytes are BGRA,
+    // but write_bmp expects RGBA. Normalize here so window-shot captures
+    // match the displayed window (and the internal readback) channel for
+    // channel — unswapped, every R/B comparison against a screenshot or
+    // the internal capture silently mismatches.
+    if (swap_fmt_ == VK_FORMAT_B8G8R8A8_UNORM) {
+        for (size_t i = 0; i < bytes; i += 4) {
+            const uint8_t r = out[static_cast<std::size_t>(i) + 2];
+            out[static_cast<std::size_t>(i) + 2] = out[static_cast<std::size_t>(i)];
+            out[static_cast<std::size_t>(i)] = r;
+        }
+    }
     vkUnmapMemory(device_, swap_staging_mem_);
     return true;
 }

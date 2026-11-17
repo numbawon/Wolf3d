@@ -645,9 +645,15 @@ int main(int argc, char** argv) {
             // WS5: consume sim events and map them to mixer voices.
             if (audio_dev)
                 play_sim_events(*audio_dev, bank, sim, args.sod);
+            // The frame must be built at the renderer's live scale: the
+            // config's res_scale (and its Options live-apply) drive the
+            // renderer, and args.res_scale is only the CLI seed for the
+            // config. Building at a stale scale leaves columns 320..320*S
+            // unwritten (default h=0 -> flat ceiling/floor across most of
+            // the frame).
             w3d::render::build_frame(frame, sim, pre_pose, prev_snap,
                                      prev_snap_count, prev_weapon_cooldown,
-                                     weapon_shift, args.res_scale);
+                                     weapon_shift, renderer.res_scale());
             prev_weapon_cooldown = sim.weapon_cooldown();
             prev_snap = frame.actor_snap;
             prev_snap_count = frame.actor_snap_count;
@@ -1011,10 +1017,11 @@ int main(int argc, char** argv) {
                         if (audio_dev)
                             play_sim_events(*audio_dev, bank, *scene_sim,
                                             args.sod, pad);
+                        // Same live-scale rule as the legacy loop above.
                         w3d::render::build_frame(
                             frame, *scene_sim, pre_pose, prev_snap,
                             prev_snap_count, prev_weapon_cooldown,
-                            weapon_shift, args.res_scale);
+                            weapon_shift, renderer.res_scale());
                         prev_weapon_cooldown = scene_sim->weapon_cooldown();
                         prev_snap = frame.actor_snap;
                         prev_snap_count = frame.actor_snap_count;

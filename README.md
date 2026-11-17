@@ -132,12 +132,12 @@ Seven suites, run directly or via `ctest` from `.build\cmake\`:
 | `w3d_audio_tests` | OPL2 chip + IMF sequencer + resampler/positional mixer |
 | `w3d_scene_tests` | UI scene state machine + menu model (title → episode → intro → game → pause → options) |
 | `w3d_config_tests` | config JSON: strict parse, tolerant mapping, round-trip, file I/O, CLI precedence |
-| `w3d_scale_tests` | internal-resolution scale math (even-column identity, sprite scaling) |
+| `w3d_scale_tests` | internal-resolution scale math (even-column identity, sprite scaling, every column written at each scale) |
 | `w3d_window_tests` | F11 fullscreen cycle against the real display (skips when headless) |
 
-At the time of writing (Phase 5, WS6) the suites total **2 516 checks**, all
-green. The suites grow as phases land; every phase keeps the previous
-suites green.
+At the time of writing (Phase 5, WS6 + pre-WS7 bugfix) the suites total
+**5 716 checks**, all green. The suites grow as phases land; every phase
+keeps the previous suites green.
 
 ## Tools
 
