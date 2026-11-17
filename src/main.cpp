@@ -27,6 +27,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,10 @@
 #include "w3d/error.hpp"
 #include "w3d/maps.hpp"
 #include "w3d/vswap.hpp"
+#include "app/audio_device.hpp"
+#include "audio/mixer.hpp"
+#include "w3d/audio.hpp"
+#include "w3d/imf.hpp"
 
 namespace {
 
@@ -78,6 +83,94 @@ const char* fullscreen_mode_name(w3d::render::FullscreenMode m) {
             return "exclusive";
     }
     return "?";
+}
+
+// ---- WS5: SFX mapping (sim event -> bank index) ----
+// PCM SFX are indexed 0..sfx_count-1 in file order. FM effects are indexed
+// by chunk number; search by name. Indices below are best-guess values from
+// the original game data and MUST be verified by ear (probe_audio_bank.txt
+// captured the real names/indices in a previous session).
+struct SfxEntry {
+    const char* fm_name;  // non-null: search fm vector by this name
+    int pcm_index;        // used when fm_name is null (-1 = not a PCM SFX)
+};
+static const SfxEntry kSfxMapBase[] = {
+    /* SfxWeapon */ {"SHOT2", -1},   // FM effect
+    /* SfxDoor */   {nullptr,  9},   // PCM SFX
+    /* SfxPickup */ {nullptr,  3},   // PCM SFX
+    /* SfxEnemyDie */{nullptr, 17},  // PCM SFX
+    /* SfxLevelExit */{nullptr, 50}, // PCM SFX
+};
+static const SfxEntry kSfxMapSod[] = {
+    /* SfxWeapon */ {"SHOT2", -1},   // FM effect (SOD reuses the name)
+    /* SfxDoor */   {nullptr,  9},
+    /* SfxPickup */ {nullptr,  3},
+    /* SfxEnemyDie */{nullptr, 17},
+    /* SfxLevelExit */{nullptr, 50},
+};
+
+inline int find_fm_chunk(const w3d::AudioBank& bank, const char* name) {
+    for (std::size_t i = 0; i < bank.fm.size(); ++i)
+        if (bank.fm[i] && bank.fm[i]->name == name)
+            return static_cast<int>(i);
+    return -1;
+}
+
+// ---- WS5: level -> music track index ----
+// Base game: 27 tracks; SOD: 24 tracks. Mapping is level -> track index,
+// clamped to the track count. Values from the original game's music table;
+// verify by ear.
+static const int kMusicMapBase[] = {
+    0,1,2,2,3,4,5,6,7,8,9,10,11,2,3,4,  // E1M1..E1M16
+    5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20, // E2M1..E2M16
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, // E3M1..E3M16
+    0,1,2,3,4,5,6,7,8,9,10,11, // E4M1..E4M12
+};
+static const int kMusicMapSod[] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20, // SOD levels
+};
+
+inline int music_for_level(int level, bool sod, int track_count) {
+    const auto& map = sod ? kMusicMapSod : kMusicMapBase;
+    const std::size_t n = sizeof(map) / sizeof(map[0]);
+    if (level < 0 || level >= static_cast<int>(n))
+        return level % track_count;
+    return map[level] % track_count;
+}
+
+// ---- WS5: sim events -> mixer voices ----
+// Maps the events of the most recent sim tick to SFX voices, panned and
+// attenuated relative to the player.
+inline void play_sim_events(w3d::app::AudioDevice& dev,
+                            const w3d::AudioBank& bank,
+                            const w3d::game::Simulation& sim, bool sod) {
+    using Event = w3d::game::Simulation::Event;
+    constexpr double kMaxDist = 1000.0;  // cells at which the gain reaches 0
+    constexpr double kNearDist = 0.5;    // closer than this: no panning
+    const auto& sfx_map = sod ? kSfxMapSod : kSfxMapBase;
+    const std::size_t map_size = sizeof(kSfxMapBase) / sizeof(kSfxMapBase[0]);
+    const double facing = std::atan2(sim.dy(), sim.dx());
+    for (const Event& sev : sim.events()) {
+        if (sev.type == Event::None || sev.sfxIndex < 0 ||
+            static_cast<std::size_t>(sev.sfxIndex) >= map_size)
+            continue;
+        const auto& entry = sfx_map[static_cast<std::size_t>(sev.sfxIndex)];
+        w3d::app::SfxPlay sp;
+        w3d::audio::Mixer::position(sev.wx, sev.wy, sim.x(), sim.y(), facing,
+                                    kMaxDist, sp.pan, sp.gain);
+        // A sound at the player's own position has no direction.
+        if (std::hypot(sev.wx - sim.x(), sev.wy - sim.y()) < kNearDist)
+            sp.pan = 0.0f;
+        if (entry.fm_name) {
+            sp.bankIndex = find_fm_chunk(bank, entry.fm_name);
+            sp.isFm = true;
+        } else {
+            sp.bankIndex = entry.pcm_index;
+            sp.isFm = false;
+        }
+        if (sp.bankIndex >= 0)
+            dev.playSfx(sp);
+    }
 }
 
 struct Args {
@@ -386,6 +479,31 @@ int main(int argc, char** argv) {
         args.frames == 0 && args.scene_start.empty() &&
         args.menu_shot.empty() && args.script.empty();
 
+    // ---- WS5: audio bank + output device ----
+    const auto audiohed_path = args.sod
+        ? base_dir / "AUDIOHED.SOD"
+        : base_dir / "AUDIOHED.WL6";
+    const auto audiot_path = args.sod
+        ? base_dir / "AUDIOT.SOD"
+        : base_dir / "AUDIOT.WL6";
+    auto bank_res = w3d::AudioBank::load(audiohed_path, audiot_path);
+    if (!bank_res) {
+        std::fprintf(stderr, "w3d: audio bank load failed: %s\n",
+                     bank_res.error().message.c_str());
+        return 1;
+    }
+    const auto& bank = *bank_res;
+    std::unique_ptr<w3d::app::AudioDevice> audio_dev =
+        std::make_unique<w3d::app::AudioDevice>(cfg.audio.device_id);
+    audio_dev->setBank(&bank);
+    audio_dev->setMasterVolume(
+        static_cast<float>(cfg.audio.master_volume) / 100.0f);
+    audio_dev->setMusicVolume(
+        static_cast<float>(cfg.audio.music_volume) / 100.0f);
+    audio_dev->setSfxVolume(
+        static_cast<float>(cfg.audio.sfx_volume) / 100.0f);
+    audio_dev->setMusicOn(cfg.audio.music_on);
+
     // ---- Window + renderer
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "w3d: SDL_Init failed: %s\n", SDL_GetError());
@@ -508,6 +626,9 @@ int main(int argc, char** argv) {
             const SimInput in = scripted ? script.input_for(frame_idx)
                                          : live.take();
             sim.tick(in);
+            // WS5: consume sim events and map them to mixer voices.
+            if (audio_dev)
+                play_sim_events(*audio_dev, bank, sim, args.sod);
             w3d::render::build_frame(frame, sim, pre_pose, prev_snap,
                                      prev_snap_count, prev_weapon_cooldown,
                                      weapon_shift, args.res_scale);
@@ -607,6 +728,12 @@ int main(int argc, char** argv) {
                 prev_snap = {};
                 prev_snap_count = 0;
                 prev_weapon_cooldown = 0;
+                // WS5: set the music track for the level (silenced if music_off).
+                const int track =
+                    music_for_level(lvl, args.sod,
+                                    static_cast<int>(bank.music.size()));
+                if (track >= 0 && track < static_cast<int>(bank.music.size()))
+                    audio_dev->setMusic(&bank.music[track]);
             };
             bool was_in_game = false;
             // WS4 live-apply state: what the renderer/window actually run
@@ -758,6 +885,10 @@ int main(int argc, char** argv) {
                             scene_sim->dx(), scene_sim->dy()};
                         const SimInput in = live.take();
                         scene_sim->tick(in);
+                        // WS5: consume sim events and map them to audio.
+                        if (audio_dev)
+                            play_sim_events(*audio_dev, bank, *scene_sim,
+                                            args.sod);
                         w3d::render::build_frame(
                             frame, *scene_sim, pre_pose, prev_snap,
                             prev_snap_count, prev_weapon_cooldown,
@@ -822,6 +953,14 @@ int main(int argc, char** argv) {
                                  serr.c_str());
             }
         }
+    }
+    if (audio_dev) {
+        const auto st = audio_dev->stats();
+        std::fprintf(stderr,
+                     "w3d: audio: device %s, %llu frames pulled, peak %.3f\n",
+                     audio_dev->ok() ? "ok" : "FAILED",
+                     static_cast<unsigned long long>(st.frames),
+                     static_cast<double>(st.peak));
     }
     vkDestroyInstance(instance, nullptr);
     SDL_Quit();

@@ -60,6 +60,13 @@ PINNED = [
         "glslang-16.6.0-windows-x86_64-release.zip",
         "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b",
     ),
+    (
+        # miniaudio single header (v0.11.x, before the 0.12 split .c/h).
+        # Header-only: compiles into the translation unit that includes it.
+        "miniaudio/miniaudio.h",
+        "https://raw.githubusercontent.com/mackron/miniaudio/master/miniaudio.h",
+        "6b376c7fbb1352ba1e0e432ab66069b335ea9405e45cb6c30b97ef0f3c9c3e0e",
+    ),
 ]
 
 # Artifacts that must exist for the marker to count.

@@ -73,17 +73,27 @@ else()
 endif()
 
 # Phase 5: UI — scene state machine + full-res menu model (WS2) + config
-# (WS4). Pure C++ (no SDL / Vulkan) so it is testable headless; the
-# renderer consumes app/menu.hpp (POD, std430-matched) and app/font8x16.inc.
+# (WS4) + audio device (WS5). Pure C++ (no SDL / Vulkan) so it is
+# testable headless; the renderer consumes app/menu.hpp (POD, std430-matched)
+# and app/font8x16.inc. The audio device pulls from the mixer and feeds
+# miniaudio (single header, no extra link).
 add_library(w3d_appui STATIC
     src/app/scene.cpp
     src/app/menu.cpp
     src/app/config.cpp)
 target_include_directories(w3d_appui PUBLIC src)
+target_link_libraries(w3d_appui PUBLIC w3d_audio)
 if(MSVC)
   target_compile_options(w3d_appui PRIVATE /W4 /permissive- /utf-8)
 else()
   target_compile_options(w3d_appui PRIVATE -Wall -Wextra)
+endif()
+if(W3D_BUILD_RENDER)
+  # miniaudio (single header v0.11.x, no extra link) for the audio device.
+  # The header lives in the fetched deps, so the device is only built here;
+  # it is included by audio_device.cpp alone, hence PRIVATE.
+  target_sources(w3d_appui PRIVATE src/app/audio_device.cpp)
+  target_include_directories(w3d_appui SYSTEM PRIVATE "${W3D_DEPS_DIR}")
 endif()
 
 if(W3D_BUILD_TESTS)
