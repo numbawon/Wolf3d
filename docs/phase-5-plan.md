@@ -27,8 +27,25 @@ Status: IN PROGRESS on branch phase-5-ui-hud.
   Evidence: scratch/w3d_ref ws4_title/ws4_pause/ws4_opt0..3.bmp (by eye);
   first-boot interactive run wrote the default config; harness runs write
   nothing.
-- NEXT: WS5 — audio device (miniaudio): pull callback, music loop, SFX
-  voices, wire the stored audio settings (volumes/music_on/device).
+- WS5 (audio device) DONE 0e1a6f3 + 2d16db2 (2026-11-16) —
+  miniaudio (v0.11 single header, fetched by fetch_deps.py into
+  .build/deps, compiled into app/audio_device.cpp only) drives a
+  48 kHz float32 stereo pull callback that draws from the Phase 4
+  mixer; the sim emits per-tick events (weapon/door/pickup/enemy
+  death/level exit) and main maps them to panned/attenuated SFX
+  voices (FM by chunk name, PCM by index); level music set on level
+  entry; volumes + music_on apply LIVE from options (WS4's PENDING
+  markers on those rows retired; the output device row stays
+  stored-only — no hot device switch, applies next launch); at exit
+  the app prints one audio stats line (device, frames pulled, peak)
+  as a headless smoke check. Smoke: scripted 600-tick run pulled
+  73 440 frames, peak 0.456. All 7 suites green (2466 checks).
+  OPEN — verify by ear: SFX bank index mapping (kSfxMapBase/kSfxMapSod),
+  PCM SFX rate (assumed 11025 Hz), level->music table — best-guess
+  tables in main.cpp.
+- NEXT: WS6 — gamepad: mapping table, deadzone, rumble, disconnect
+  handling; menu navigation via gamepad (verify the Steam Deck path if
+  hardware available).
 Decisions confirmed by user 2026-11-14: 1, 4, 5 as
 recommended; 2 REVISED (configurable internal resolution 1x-4x instead of
 320x200-strict); 3 REVISED (keyboard rebind UI in P5 + standard gamepad
@@ -489,6 +506,12 @@ Rebind UI (Controls section of options, full-res modern):
      omitted until WS9 ships the editor.
 5. Audio device: miniaudio in .build/deps; pull callback; music loop;
    SFX voices; volume/device settings wired.
+   DONE 0e1a6f3 + 2d16db2 (2026-11-16) — miniaudio v0.11 header pinned
+   in fetch_deps.py; app/audio_device.* (pull callback, device list,
+   stats line at exit); sim per-tick events -> panned SFX voices;
+   level music on level entry; volumes + music_on live-applied from
+   options (device row stored-only). SFX mapping / PCM rate / music
+   table pending verify-by-ear.
 6. Gamepad: mapping table, deadzone, rumble, disconnect handling; menu
    navigation via gamepad (verify the Steam Deck path if hardware
    available).
