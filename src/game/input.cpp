@@ -61,18 +61,89 @@ void LiveInput::on_key(const char* key, bool down) {
     }
 }
 
-void LiveInput::on_mouse(double xrel) { dx_ += xrel; }
+void LiveInput::set_sensitivity(double s) {
+    sensitivity_ = s > 0.0 ? s : 1.0;
+}
+
+void LiveInput::on_mouse(double xrel) { dx_ += xrel * sensitivity_; }
 
 void LiveInput::shoot() { shoot_ = true; }
 
+void LiveInput::on_gamepad_button(int button, bool down) {
+    if (button < 0 || button > 15)
+        return;
+    const std::uint16_t bit = static_cast<std::uint16_t>(1u << button);
+    if (down) {
+        if (gpad_btn_ & bit)
+            return;  // already held: no re-fire
+        gpad_btn_ |= bit;
+        if (button == gamepad::kSouth)
+            shoot_ = true;
+        else if (button == gamepad::kEast)
+            activate_ = true;
+    } else {
+        gpad_btn_ &= ~bit;
+    }
+}
+
+void LiveInput::on_gamepad_axis(int axis, float value) {
+    const float dz = gamepad::kDeadzone;
+    if (axis == gamepad::kLeftX) {
+        std::uint8_t bits = 0;
+        if (value < -dz)
+            bits = kLeft;
+        else if (value > dz)
+            bits = kRight;
+        gpad_mov_ =
+            static_cast<std::uint8_t>((gpad_mov_ & ~(kLeft | kRight)) | bits);
+    } else if (axis == gamepad::kLeftY) {
+        std::uint8_t bits = 0;
+        if (value < -dz)
+            bits = kFwd;  // pushed up
+        else if (value > dz)
+            bits = kBwd;  // pushed down
+        gpad_mov_ =
+            static_cast<std::uint8_t>((gpad_mov_ & ~(kFwd | kBwd)) | bits);
+    }
+}
+
+void LiveInput::clear_gamepad() {
+    gpad_btn_ = 0;
+    gpad_mov_ = 0;
+}
+
+int LiveInput::gamepad_direction() const {
+    // Stick takes precedence over the D-pad (finer control).
+    if (gpad_mov_ & kFwd)
+        return gamepad::kDirUp;
+    if (gpad_mov_ & kBwd)
+        return gamepad::kDirDown;
+    if (gpad_mov_ & kLeft)
+        return gamepad::kDirLeft;
+    if (gpad_mov_ & kRight)
+        return gamepad::kDirRight;
+    if (gpad_btn_ & (1u << gamepad::kDpadUp))
+        return gamepad::kDirUp;
+    if (gpad_btn_ & (1u << gamepad::kDpadDown))
+        return gamepad::kDirDown;
+    if (gpad_btn_ & (1u << gamepad::kDpadLeft))
+        return gamepad::kDirLeft;
+    if (gpad_btn_ & (1u << gamepad::kDpadRight))
+        return gamepad::kDirRight;
+    return gamepad::kDirNone;
+}
+
 SimInput LiveInput::take() {
     SimInput in;
-    in.forward = held_ & kFwd;
-    in.backward = held_ & kBwd;
-    in.turn_left = held_ & kLeft;
-    in.turn_right = held_ & kRight;
-    in.strafe_left = held_ & kStrafeL;
-    in.strafe_right = held_ & kStrafeR;
+    // Keyboard and gamepad (WS6) share the movement mask.
+    const std::uint8_t held =
+        static_cast<std::uint8_t>(held_ | gpad_mov_);
+    in.forward = held & kFwd;
+    in.backward = held & kBwd;
+    in.turn_left = held & kLeft;
+    in.turn_right = held & kRight;
+    in.strafe_left = held & kStrafeL;
+    in.strafe_right = held & kStrafeR;
     // Net mouse motion above half a pixel turns this tick.
     if (dx_ < -0.5)
         in.turn_left = true;

@@ -1,0 +1,122 @@
+// menu.comp — full-res 2D menu pass (WS2).
+//
+// Draws one menu frame (MenuDraw, std430 SSBO) into a window-sized
+// R8G8B8A8 storage image: flat background, then per element a box and a
+// text run. Text is the embedded 8x16 bitmap font (font8x16.inc, uploaded
+// to the Font SSBO: 95 glyphs, 4 u32 each, 4 rows per u32, MSB = leftmost
+// pixel), nearest-scaled by `scale`.
+//
+// The renderer blits the result 1:1 (nearest) into the swapchain.
+//
+// ARM64 driver traps (proven this project — do not "clean up"):
+//  - byte extraction must use `% 256u`, never `& 0xFF` (miscompiles to a
+//    nonzero test);
+//  - imageStore takes a FLOAT vec4 (uvec4 quantizes each component);
+//  - TRAP (cost a day): a pure-write compute probe (imageStore only, no
+//    buffer reads) comes back VERTICALLY FLIPPED on this driver (full-image
+//    unique-pixel probes, 320x200 and 640x400: every row r returned at
+//    height-1-r), while this shader (which reads the Menu/Font SSBOs) and
+//    the game's wall/sprite pipelines are NOT flipped. Do NOT "fix" the
+//    store coordinate with a pre-flip: on this shader it double-flips the
+//    result to a 180-degree rotation. If a new compute pass shows flipped
+//    output, suspect the pipeline before touching coordinates.
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct Element {
+    vec2 pos;
+    vec2 size;
+    vec2 tpos;
+    float scale;
+    float len;
+    uint flags;
+    uint pad;
+    uint text[10];
+};
+
+layout(set = 0, binding = 0) buffer Menu {
+    uint width;
+    uint height;
+    uint count;
+    uint pad;
+    Element els[16];
+    uint palette[6];  // bg, item, selected, text, text_sel, accent (RGBA)
+};
+
+layout(set = 0, binding = 1) buffer Font {
+    uint g[380];  // 95 glyphs x 4 u32
+};
+
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D out_img;
+
+const uint kBox = 1u;
+const uint kSelected = 2u;
+const uint kHovered = 4u;
+const uint kAccent = 8u;
+
+vec4 pal(int i) {
+    uint v = palette[i];
+    return vec4(float(v % 256u), float((v / 256u) % 256u),
+                float((v / 65536u) % 256u),
+                float((v / 16777216u) % 256u)) / 255.0;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (uint(p.x) >= width || uint(p.y) >= height)
+        return;
+
+    vec4 col = pal(0);  // background
+
+    for (uint i = 0; i < count; ++i) {
+        Element e = els[i];
+
+        // Item box (elements without kBox are text-only).
+        if ((e.flags & kBox) != 0u) {
+            if (uint(p.x) >= uint(e.pos.x) &&
+                uint(p.x) < uint(e.pos.x + e.size.x) &&
+                uint(p.y) >= uint(e.pos.y) &&
+                uint(p.y) < uint(e.pos.y + e.size.y)) {
+                if ((e.flags & kSelected) != 0u)
+                    col = pal(2);
+                else if ((e.flags & kHovered) != 0u)
+                    col = pal(1) + vec4(0.12);
+                else
+                    col = pal(1);
+            }
+        }
+
+        // Text run: glyph cell = 8*scale x 16*scale, nearest-sampled.
+        float cellw = 8.0 * e.scale;
+        float cellh = 16.0 * e.scale;
+        float fx = float(p.x);
+        float fy = float(p.y);
+        if (fx >= e.tpos.x && fx < e.tpos.x + cellw * e.len &&
+            fy >= e.tpos.y && fy < e.tpos.y + cellh) {
+            uint cx = uint((fx - e.tpos.x) / cellw);     // 0 .. len-1
+            // One source row spans `scale` px; dividing by cellh (the
+            // full glyph height) would always yield row 0.
+            uint row = uint((fy - e.tpos.y) / e.scale);  // 0 .. 15
+            uint ch = (e.text[cx / 4u] >> (8u * (cx % 4u))) % 256u;
+            if (ch >= 32u && ch <= 126u) {
+                uint byte = (g[(ch - 32u) * 4u + row / 4u] >>
+                             (8u * (row % 4u))) % 256u;
+                uint lx = uint((fx - e.tpos.x - float(cx) * cellw) / e.scale);
+                uint bit = (byte >> (7u - lx)) % 2u;
+                if (bit == 1u) {
+                    vec4 tc;
+                    if ((e.flags & kSelected) != 0u)
+                        tc = pal(4);
+                    else if ((e.flags & kAccent) != 0u)
+                        tc = pal(5);
+                    else
+                        tc = pal(3);
+                    col = tc;
+                }
+            }
+        }
+    }
+
+    imageStore(out_img, p, col);
+}

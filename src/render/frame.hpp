@@ -19,10 +19,15 @@
 
 namespace w3d::render {
 
-// Internal resolution (reference setZoom(2): 320x200).
+// Base internal resolution (reference setZoom(2): 320x200). WS3 (P5)
+// parameterizes the raycaster by an integer scale S in 1..4: the internal
+// frame is (320*S, 200*S) and the same DDA/sprite math runs over it
+// (S=1 is the pixel-perfect acceptance baseline). The per-column records
+// therefore number (320*S) and are stored with the S=4 capacity.
 inline constexpr int kColumns = 320;
 inline constexpr int kRows = 200;
 inline constexpr int kMaxSprites = 256;
+inline constexpr int kMaxScale = 4;
 
 // Reference camera: fov = 1 (camera plane magnitude per unit forward),
 // wallHeight = pixelWidth / (2 * fov) = 160 at 320x200.
@@ -78,9 +83,12 @@ struct Frame {
     std::array<float, 4096> wall_dx{};
     std::array<float, 4096> wall_dy{};
 
-    std::array<ColumnRecord, kColumns> columns{};
+    std::array<ColumnRecord, kColumns * kMaxScale> columns{};
     std::array<SpriteRecord, kMaxSprites> sprites{};
     int sprite_count = 0;
+    // Internal render scale (WS3): the columns[] / sprite geometry above are
+    // authored for (320*scale, 200*scale).
+    std::uint32_t scale = 1;
 
     double px = 0.5, py = 0.5, pdx = 0.0, pdy = -1.0;
     // Pre-tick player pose (the pose the tick started from). The reference
@@ -133,10 +141,14 @@ void effective_palette(const Flash& fl,
 // frame's sim cooldown counter (resolves the last 424 frame of the firing
 // animation, see weapon_sprite). `weapon_shift` is the VSWAP bank offset of
 // the pistol frames (0 for the base bank; -15 for SOD, whose re-packed
-// VSWAP holds the byte-identical pistol at 406..410).
+// VSWAP holds the byte-identical pistol at 406..410). `scale` is the
+// internal render scale (WS3, 1..4): the DDA runs (320*scale) columns and
+// the wall/sprite geometry is authored in (320*scale, 200*scale) pixel
+// space — at scale 1 every value is exactly the reference 320x200 one.
 void build_frame(Frame& f, const game::Simulation& sim, const Pose& prev_pose,
                  const std::array<Frame::ActorSnap, kMaxSprites>& prev_snap,
-                 int prev_snap_count, int prev_weapon_cooldown, int weapon_shift);
+                 int prev_snap_count, int prev_weapon_cooldown, int weapon_shift,
+                 std::uint32_t scale = 1);
 
 // Weapon sprite index from the sim's cooldown counter and the previous
 // frame's counter (reference: 421 at rest; while firing, 421 for six ticks,

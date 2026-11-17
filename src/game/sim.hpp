@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "game/level.hpp"
 
@@ -74,6 +75,31 @@ public:
     [[nodiscard]] int weapon_cooldown() const { return weapon_ticks_; }
     [[nodiscard]] int thing_count() const;  // not-yet-removed actors
 
+    // ---- Audio/sim events (WS5) ----
+    // One discrete event emitted by the sim during a tick. The app reads
+    // these each frame and maps them to mixer voices / music / messages.
+    struct Event {
+        enum Type { None, SfxWeapon, SfxDoor, SfxPickup, SfxEnemyDie,
+                    SfxPlayerDie, SfxPushwall, SfxLevelExit, Message, Rumble };
+        Type type = None;
+        // Sfx: index into the app's SFX mapping table (bank index + isFm
+        //     resolved by the app). Position (world coords) for pan.
+        int sfxIndex = -1;
+        double wx = 0.0, wy = 0.0;
+        // Message text.
+        std::string text;
+        // Rumble: strength (0..1) and duration (ms).
+        float rumbleStrength = 0.0f;
+        int rumbleMs = 0;
+        // Level exit: next level index.
+        int nextLevel = -1;
+    };
+
+    // Events emitted during the most recent tick. Call clearEvents() after
+    // consuming them.
+    [[nodiscard]] const std::vector<Event>& events() const { return events_; }
+    void clearEvents() { events_.clear(); }
+
     // Door / pushwall timers (reference doorTimers / wallTimers), exposed
     // read-only for the renderer's per-cell door/pushwall shift state.
     struct DoorTimer {
@@ -115,6 +141,10 @@ private:
     std::vector<WallTimer> wall_timers_;
     std::uint64_t tick_count_ = 0;
 
+    // WS5: events emitted during the most recent tick.
+    std::vector<Event> events_;
+
+    void emit(Event::Type type, int sfxIndex, double wx, double wy);
     void turn(double alpha);
     bool can_move_to(double x, double y) const;
     void move(double length, double sideways = 0.0);

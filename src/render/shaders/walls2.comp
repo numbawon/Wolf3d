@@ -1,0 +1,97 @@
+// w3d render/shaders/walls2.comp — wall pass 2 (WS3): fog + image store.
+//
+// Dispatch (S, 1, 1) x local 320 = W = 320*S invocations, one per internal
+// column. Reads the rows walls1.comp resolved into scratch (pass 1) and,
+// for each row, picks the fog distance: rows inside the wall union
+// [wlo, whi) use the column's ray distance t; all other rows are
+// floor/ceiling and use the per-row plane distance table (computed on the
+// CPU, uploaded in the columns-SSBO tail). M4 fog model: level L =
+// min(23, floor(dist / step)), blend u = L/23 toward a brown ramp
+// (FOG_NEAR at low levels, FOG_FAR at full fog). dist is in cells (the
+// reference's zIndex units); the horizon row saturates (99.0 -> level 23).
+//
+// The per-column fog inputs (wall-union rows wlo/whi) and the fog switch
+// are computed on the CPU (renderer.cpp) and uploaded in the trailing
+// region of the columns SSBO. Rationale: it keeps the shader free of any
+// new expression forms and makes the fog fully cross-checkable against the
+// CPU model pixel by pixel.
+//
+// Driver facts carried over from the old walls.comp: UBO descriptor
+// offsets must be 256-byte aligned and bool UBO members are misplaced on
+// this ARM64 driver — the fog switch is a double (1.0/0.0, tested < 0.5)
+// in the SSBO tail; byte extraction via % 256; imageStore takes a float
+// vec4 (the driver quantizes uvec4 components).
+#version 460
+
+layout(local_size_x = 320) in;
+
+struct Col {
+    double t;
+    double h;
+    double tx;
+    uint tex;
+};
+// Columns SSBO, std430 (see the layout table in renderer.cpp):
+// columns[1280] @0, fog_invstep @40960, fog_on @40968, rowdist[800] @40976,
+// wlo_arr[1280] @47376, whi_arr[1280] @52496 (block ends at 57616).
+layout(set = 0, binding = 0) buffer Columns {
+    Col columns[1280];
+    double fog_invstep;
+    double fog_on;
+    double rowdist[800];
+    int wlo_arr[1280];
+    int whi_arr[1280];
+} cb;
+
+layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
+layout(set = 0, binding = 5) uniform Counts {
+    uint spriteCount;
+    uint scale;
+} counts;
+layout(set = 0, binding = 6, rgba8) uniform writeonly image2D screen;
+layout(set = 0, binding = 7) buffer Scratch { uint px[]; };
+
+// Fog brown ramp (0-255 float space).
+const vec3 FOG_NEAR = vec3(140.0, 92.0, 40.0);
+const vec3 FOG_FAR = vec3(24.0, 14.0, 6.0);
+
+// dist in cells -> fogged 255-space vec3 (in = 255-space).
+vec3 fog_mixed(vec3 c, double dist) {
+    if (cb.fog_on < 0.5 || cb.fog_invstep <= 0.0)
+        return c;
+    uint L = min(23u, uint(dist * cb.fog_invstep));
+    if (L == 0u)
+        return c;
+    float u = float(L) / 23.0;
+    vec3 fc = mix(FOG_NEAR, FOG_FAR, u);
+    return c * (1.0 - u) + fc * u;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    const uint H = 200u * counts.scale;
+    Col c = cb.columns[x];
+    const int wl = cb.wlo_arr[x];
+    const int wh = cb.whi_arr[x];
+    const uint baseidx = x * H;
+    for (uint row = 0u; row < H; ++row) {
+        uint pv = px[baseidx + row];
+        // Pass 1 stores the prefill palette color (high byte 0xff) for
+        // ceiling/floor rows and the raw texel index + 256 for wall rows;
+        // the palette lookup happens here (single source: the per-frame
+        // uploaded palette, flash included).
+        uint pval = ((pv >> 24u) == 0xffu) ? pv : color[pv - 256u];
+        const double d =
+            (int(row) >= wl && int(row) < wh)
+                ? c.t
+                : cb.rowdist[row];
+        vec3 col = vec3(float(pval % 256u), float((pval / 256u) % 256u),
+                        float((pval / 65536u) % 256u));
+        vec3 outc = fog_mixed(col, d);
+        imageStore(screen, ivec2(int(x), int(row)),
+                   vec4((outc.r + 0.5) / 255.0,
+                        (outc.g + 0.5) / 255.0,
+                        (outc.b + 0.5) / 255.0,
+                        1.0));
+    }
+}

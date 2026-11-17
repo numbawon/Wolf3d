@@ -18,6 +18,7 @@
 #include "w3d/carmack.hpp"
 #include "w3d/maps.hpp"
 #include "w3d/palette.hpp"
+#include "w3d/vga.hpp"
 #include "w3d/vswap.hpp"
 
 namespace {
@@ -274,6 +275,127 @@ static void test_palette() {
 
 static Register r_palette("palette", test_palette);
 
+// --------------------------------------------------------------------- vga
+
+namespace {
+
+// FNV-1a 32 over all decoded pic RGBA (row-major, 4 bytes/pixel).
+std::uint32_t vga_rgba_hash(const w3d::VgaGraph& v) {
+    std::uint32_t h = 0x811C9DC5u;
+    for (const auto& p : v.pics) {
+        if (p.rgba.empty())
+            continue;
+        for (std::uint8_t b : p.rgba) {
+            h ^= b;
+            h *= 0x01000193u;
+        }
+    }
+    return h;
+}
+
+std::size_t vga_font_ink(const w3d::VgaFont& f) {
+    std::size_t n = 0;
+    for (const auto& g : f.glyphs)
+        for (std::uint8_t b : g.px)
+            n += (b != 0);
+    return n;
+}
+
+std::size_t vga_font_nonempty(const w3d::VgaFont& f) {
+    std::size_t n = 0;
+    for (const auto& g : f.glyphs)
+        n += (g.width != 0);
+    return n;
+}
+
+} // namespace
+
+// Golden values from the independent Python decoder (verified by eye: fonts
+// legible, faces/icons/text art recognizable; see docs/formats.md).
+static void test_vga_base() {
+    g_current = "vga_base";
+    const auto g = game_dir();
+    auto res = w3d::VgaGraph::load(g / "base" / "VGAHEAD.WL6",
+                                   g / "base" / "VGAGRAPH.WL6",
+                                   g / "base" / "VGADICT.WL6");
+    CHECK(res.has_value());
+    if (!res) {
+        std::printf("  (load error: %s)\n", res.error().message.c_str());
+        return;
+    }
+    auto& v = *res;
+    CHECK_EQ(v.numChunks, 149u);
+    CHECK_EQ(v.pics.size(), 132u);
+
+    // Named pic dims (pictable entry = IGRAB chunk - 3).
+    CHECK_EQ(v.pics[0].w, 96u);   CHECK_EQ(v.pics[0].h, 88u);    // H_BJPIC (3)
+    CHECK_EQ(v.pics[40].w, 104u); CHECK_EQ(v.pics[40].h, 88u);   // L_GUYPIC (43)
+    CHECK_EQ(v.pics[83].w, 320u); CHECK_EQ(v.pics[83].h, 40u);   // STATUSBARPIC (86)
+    CHECK_EQ(v.pics[84].w, 320u); CHECK_EQ(v.pics[84].h, 200u);  // TITLEPIC (87)
+    CHECK_EQ(v.pics[106].w, 24u); CHECK_EQ(v.pics[106].h, 32u);  // FACE1A (109)
+    CHECK_EQ(v.pics[131].w, 224u); CHECK_EQ(v.pics[131].h, 48u); // GETPSYCHEDPIC (134)
+    for (const auto& p : v.pics) {
+        if (!p.rgba.empty())
+            CHECK_EQ(p.rgba.size(),
+                     static_cast<std::size_t>(p.w) * p.h * 4u);
+    }
+
+    // Anchor pixels (center of each pic).
+    {
+        const auto* px = v.pics[0].at(48, 44);       // H_BJPIC
+        CHECK_EQ(px[0], 186u); CHECK_EQ(px[1], 255u); CHECK_EQ(px[2], 255u);
+        px = v.pics[40].at(52, 44);                  // L_GUYPIC
+        CHECK_EQ(px[0], 255u); CHECK_EQ(px[1], 255u); CHECK_EQ(px[2], 218u);
+        px = v.pics[84].at(160, 100);                // TITLEPIC
+        CHECK_EQ(px[0], 255u); CHECK_EQ(px[1], 186u); CHECK_EQ(px[2], 186u);
+        px = v.pics[131].at(112, 24);                // GETPSYCHEDPIC
+        CHECK_EQ(px[0], 222u); CHECK_EQ(px[1], 222u); CHECK_EQ(px[2], 222u);
+        px = v.pics[106].at(12, 16);                 // FACE1A
+        CHECK_EQ(px[0], 218u); CHECK_EQ(px[1], 255u); CHECK_EQ(px[2], 255u);
+    }
+    // Whole-image golden: any decode/palette change flips this.
+    CHECK_EQ(vga_rgba_hash(v), 0x39CFD9ECu);
+
+    // Fonts: height, glyph metrics, ink totals.
+    CHECK_EQ(v.smallFont.height, 10u);
+    CHECK_EQ(v.smallFont.glyph('A').width, 7u);
+    CHECK_EQ(v.smallFont.glyph('W').width, 8u);
+    CHECK_EQ(vga_font_nonempty(v.smallFont), 109u);
+    CHECK_EQ(vga_font_ink(v.smallFont), 2239u);
+    CHECK_EQ(v.bigFont.height, 13u);
+    CHECK_EQ(v.bigFont.glyph('A').width, 10u);
+    CHECK_EQ(v.bigFont.glyph('W').width, 12u);
+    CHECK_EQ(vga_font_nonempty(v.bigFont), 97u);
+    CHECK_EQ(vga_font_ink(v.bigFont), 4797u);
+
+    // TILE8 chunk: implicit size; GOG files carry 2240 bytes (35 x 8x8).
+    CHECK_EQ(v.tiles.size(), 2240u);
+}
+
+static void test_vga_sod() {
+    g_current = "vga_sod";
+    const auto g = game_dir();
+    auto res = w3d::VgaGraph::load(g / "base/m1" / "VGAHEAD.SOD",
+                                   g / "base/m1" / "VGAGRAPH.SOD",
+                                   g / "base/m1" / "VGADICT.SOD");
+    CHECK(res.has_value());
+    if (!res) {
+        std::printf("  (load error: %s)\n", res.error().message.c_str());
+        return;
+    }
+    auto& v = *res;
+    CHECK_EQ(v.numChunks, 169u);
+    CHECK_EQ(v.pics.size(), 147u);
+    CHECK_EQ(v.smallFont.height, 10u);
+    CHECK_EQ(vga_font_ink(v.smallFont), 2239u);  // identical to base
+    CHECK_EQ(vga_font_ink(v.bigFont), 4789u);
+    CHECK_EQ(v.tiles.size(), 2240u);
+    CHECK_EQ(vga_rgba_hash(v), 0xFD2DED9Au);
+}
+
+static Register r_vga_base("vga_base", test_vga_base);
+static Register r_vga_sod("vga_sod", test_vga_sod);
+
 // ------------------------------------------------------------- error paths
 
 static void test_error_paths() {
@@ -294,6 +416,44 @@ static void test_error_paths() {
     auto bad = w3d::Vswap::load(path);
     CHECK(!bad.has_value());
     std::filesystem::remove(path);
+
+    // Missing VGAGRAPH files.
+    auto vres = w3d::VgaGraph::load(game_dir() / "nohead.WL6", game_dir() / "nograph.WL6",
+                                    game_dir() / "nodict.WL6");
+    CHECK(!vres.has_value());
+    if (!vres)
+        CHECK(vres.error().kind == w3d::Error::Kind::Io);
+
+    // All-zero VGA trio: VGAHEAD (6 B, last entry 0 == graph size 0...
+    // graph must be non-empty for the sentinel check, so use a 3-byte graph
+    // whose size the last entry claims) -> corrupt chunk 0.
+    {
+        auto tmp = std::filesystem::temp_directory_path();
+        std::vector<std::uint8_t> head{0, 0, 0, 3, 0, 0};  // entries 0, 3
+        std::vector<std::uint8_t> graph(3, 0);
+        std::vector<std::uint8_t> dict(1024, 0);
+        auto wpath = tmp / "w3d_test_vga_head.tmp";
+        auto gpath = tmp / "w3d_test_vga_graph.tmp";
+        auto dpath = tmp / "w3d_test_vga_dict.tmp";
+        {
+            std::ofstream f(wpath, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(head.data()), head.size());
+            f.close();
+            f.open(gpath, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(graph.data()), graph.size());
+            f.close();
+            f.open(dpath, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(dict.data()), dict.size());
+            f.close();
+        }
+        auto vbad = w3d::VgaGraph::load(wpath, gpath, dpath);
+        CHECK(!vbad.has_value());
+        if (!vbad)
+            CHECK(vbad.error().kind == w3d::Error::Kind::Corrupt);
+        std::filesystem::remove(wpath);
+        std::filesystem::remove(gpath);
+        std::filesystem::remove(dpath);
+    }
 }
 
 static Register r_errors("error_paths", test_error_paths);

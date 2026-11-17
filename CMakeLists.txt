@@ -36,6 +36,7 @@ add_library(w3d_data STATIC
     src/w3d/carmack.cpp
     src/w3d/maps.cpp
     src/w3d/vswap.cpp
+    src/w3d/vga.cpp
     src/w3d/audio.cpp
     src/w3d/opl2.cpp
     src/w3d/imf.cpp)
@@ -71,6 +72,30 @@ else()
   target_compile_options(w3d_audio PRIVATE -Wall -Wextra)
 endif()
 
+# Phase 5: UI — scene state machine + full-res menu model (WS2) + config
+# (WS4) + audio device (WS5). Pure C++ (no SDL / Vulkan) so it is
+# testable headless; the renderer consumes app/menu.hpp (POD, std430-matched)
+# and app/font8x16.inc. The audio device pulls from the mixer and feeds
+# miniaudio (single header, no extra link).
+add_library(w3d_appui STATIC
+    src/app/scene.cpp
+    src/app/menu.cpp
+    src/app/config.cpp)
+target_include_directories(w3d_appui PUBLIC src)
+target_link_libraries(w3d_appui PUBLIC w3d_audio)
+if(MSVC)
+  target_compile_options(w3d_appui PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(w3d_appui PRIVATE -Wall -Wextra)
+endif()
+if(W3D_BUILD_RENDER)
+  # miniaudio (single header v0.11.x, no extra link) for the audio device.
+  # The header lives in the fetched deps, so the device is only built here;
+  # it is included by audio_device.cpp alone, hence PRIVATE.
+  target_sources(w3d_appui PRIVATE src/app/audio_device.cpp)
+  target_include_directories(w3d_appui SYSTEM PRIVATE "${W3D_DEPS_DIR}")
+endif()
+
 if(W3D_BUILD_TESTS)
   enable_testing()
   add_executable(w3d_tests tests/test_formats.cpp)
@@ -99,6 +124,37 @@ if(W3D_BUILD_TESTS)
     target_compile_options(w3d_audio_tests PRIVATE /W4 /permissive- /utf-8)
   endif()
   add_test(NAME audio COMMAND w3d_audio_tests)
+
+  add_executable(w3d_scene_tests tests/test_scene.cpp)
+  target_link_libraries(w3d_scene_tests PRIVATE w3d_appui)
+  if(MSVC)
+    target_compile_options(w3d_scene_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME scene COMMAND w3d_scene_tests)
+
+  # WS4: config JSON parse/serialize, tolerance, file I/O, CLI precedence.
+  add_executable(w3d_config_tests tests/test_config.cpp)
+  target_link_libraries(w3d_config_tests PRIVATE w3d_appui)
+  if(MSVC)
+    target_compile_options(w3d_config_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME config COMMAND w3d_config_tests)
+
+  add_executable(w3d_scale_tests tests/test_scale.cpp)
+  target_link_libraries(w3d_scale_tests PRIVATE w3d_render w3d_game)
+  if(MSVC)
+    target_compile_options(w3d_scale_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME scale COMMAND w3d_scale_tests)
+
+  # WS3: display-mode cycle (F11) against the real SDL3 + display; skips
+  # when headless.
+  add_executable(w3d_window_tests tests/test_window.cpp)
+  target_link_libraries(w3d_window_tests PRIVATE w3d_render)
+  if(MSVC)
+    target_compile_options(w3d_window_tests PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME window COMMAND w3d_window_tests)
 endif()
 
 # Phase 4: audio evidence tool — renders the game's music / FM effects / a
@@ -191,8 +247,8 @@ if(W3D_BUILD_RENDER)
 
   # Game application (M3: simulation + raycast renderer).
   add_executable(w3d_app src/main.cpp)
-  target_link_libraries(w3d_app PRIVATE w3d_render w3d_game)
-  w3d_add_shaders(w3d_app walls.comp sprites.comp)
+  target_link_libraries(w3d_app PRIVATE w3d_render w3d_game w3d_appui)
+  w3d_add_shaders(w3d_app walls1.comp walls2.comp sprites.comp menu.comp)
   if(MSVC)
     target_compile_options(w3d_app PRIVATE /W4 /permissive- /utf-8)
   endif()

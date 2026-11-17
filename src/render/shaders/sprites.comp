@@ -30,21 +30,24 @@ struct Spr {
     uint scale;
     uint sprite;
 };
-layout(set = 0, binding = 0) buffer Columns { Col columns[320]; } cb;
+layout(set = 0, binding = 0) buffer Columns { Col columns[1280]; } cb;
 
 layout(set = 0, binding = 1) buffer WallAtlas { uint texel[]; };
 layout(set = 0, binding = 2) buffer SpriteAtlas { uint texel[]; } satlas;
 layout(set = 0, binding = 3) buffer Palette { uint color[256]; };
 // The fog params ride as two trailing doubles in the sprites SSBO (same
 // UBO-corruption workaround as walls.comp): absolute buffer offset
-// 16384 + 256*40 = 26624.
+// 57856 + 256*48 = 70144 (WS3 layout, see renderer.cpp).
 layout(set = 0, binding = 4) buffer Sprites {
     Spr sprites[256];
     double fog_invstep;
     double fog_on;
 } sb;
 
-layout(set = 0, binding = 5) uniform Counts { uint spriteCount; };
+layout(set = 0, binding = 5) uniform Counts {
+    uint spriteCount;
+    uint scale;
+} counts;
 layout(set = 0, binding = 6, rgba8) uniform writeonly image2D screen;
 
 // M4 fog (same function as walls.comp; the weapon's distance is 0 -> level
@@ -66,12 +69,16 @@ vec3 fog_mixed(vec3 c, double dist) {
 void main() {
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
-    if (x >= 320u || y >= 200u)
+    // WS3: the frame is (320*scale, 200*scale); the sprite geometry in the
+    // records is authored in that scaled space (frame.cpp).
+    const uint W = 320u * counts.scale;
+    const uint H = 200u * counts.scale;
+    if (x >= W || y >= H)
         return;
 
     double z = cb.columns[x].t;  // column ray distance (reference zIndex)
 
-    for (uint i = 0; i < spriteCount; ++i) {
+    for (uint i = 0; i < counts.spriteCount; ++i) {
         const Spr sp = sb.sprites[i];
         if (sp.dist >= z)
             continue;  // z test (reference drawScaledPixel)

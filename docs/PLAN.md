@@ -132,10 +132,22 @@ docs/        plan, format write-ups
    with a 16-bit/44.1k drop-in (439.5 Hz measured -> 48 kHz). Positional
    panning verified left/centre/right. 100 audio checks green (173 format +
    386 sim unchanged). WAV evidence via tools/w3d_audio_dump.
-5. `phase-5-ui-hud` — HUD, menus, messages, high scores, input (kb + gamepad).
-   ACCEPT: full play loop of one episode start→death→restart.
-6. `phase-6-polish` — widescreen, config, save games, hi-res asset pipeline
-   documentation + hooks.
+5. `phase-5-ui-hud` — HUD, menus, messages, high scores, input (kb +
+   gamepad + keyboard rebind UI), audio device + settings, modern
+   windowing (internal resolution 1x-4x, fullscreen/scale), persistent
+   config. Full plan: docs/phase-5-plan.md (planned 2026-11-14; decisions
+   1-5 CONFIRMED by user: hybrid UI, internal res 1x-4x with 1x authentic
+   default, rebind UI + standard gamepad mapping with Steam Deck support,
+   versioned JSON config, audio settings + device picker; WS4 kickoff
+   decisions confirmed 2026-11-16 as recommended). Progress: WS1 DONE
+   fba657c, WS2 DONE 13d1bc5 + a93a1e2, WS3 DONE f508bdd, WS4 DONE e4d981c
+   (config + options/pause scenes); next WS5 audio device.
+   ACCEPT: full play loop of one episode start->death->restart, menus
+   usable with keyboard AND gamepad, settings (incl. rebinds and internal
+   resolution) survive a restart.
+6. `phase-6-polish` — widescreen, save games, hi-res texture packs
+   (enabled by P5's internal upscaling), per-button gamepad rebinds if
+   wanted (config/settings persistence moved to Phase 5).
    ACCEPT: episode playable start-to-end with clean performance.
 
 ## Phase 2 kickoff (next session starts here)

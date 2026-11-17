@@ -749,6 +749,73 @@ static Register r_level("level_build_synthetic", test_level_build_synthetic);
 static Register r_door("door_open_close", test_door_open_close);
 static Register r_locked("locked_door", test_locked_door);
 static Register r_collect("collect_pickups", test_collect_pickups);
+static void test_input_gamepad() {
+    g_current = "input_gamepad";
+    using namespace w3d::game::gamepad;
+    LiveInput in;
+    // Deadzone: below it inert, above it sets the bit, re-center clears.
+    in.on_gamepad_axis(kLeftX, -0.24f);
+    SimInput s = in.take();
+    CHECK(!s.turn_left);
+    in.on_gamepad_axis(kLeftX, -0.26f);
+    s = in.take();
+    CHECK(s.turn_left);
+    in.on_gamepad_axis(kLeftX, 0.0f);
+    s = in.take();
+    CHECK(!s.turn_left);
+    // Stick Y inversion (push up = forward).
+    in.on_gamepad_axis(kLeftY, -0.5f);
+    s = in.take();
+    CHECK(s.forward);
+    CHECK(!s.backward);
+    in.on_gamepad_axis(kLeftY, 0.5f);
+    s = in.take();
+    CHECK(s.backward);
+    CHECK(!s.forward);
+    in.on_gamepad_axis(kLeftY, 0.0f);
+    // A edge: one shot per press; holding never re-fires.
+    in.on_gamepad_button(kSouth, true);
+    s = in.take();
+    CHECK(s.shoot);
+    s = in.take();
+    CHECK(!s.shoot);
+    in.on_gamepad_button(kSouth, false);
+    in.on_gamepad_button(kSouth, true);
+    s = in.take();
+    CHECK(s.shoot);
+    // B edge: activate.
+    in.on_gamepad_button(kSouth, false);
+    in.on_gamepad_button(kEast, true);
+    s = in.take();
+    CHECK(s.activate);
+    in.on_gamepad_button(kEast, false);
+    // Keyboard and gamepad merge.
+    LiveInput m;
+    m.on_key("ArrowUp", true);
+    m.on_gamepad_axis(kLeftX, -0.5f);
+    SimInput mm = m.take();
+    CHECK(mm.forward);
+    CHECK(mm.turn_left);
+    // Menu direction: stick takes precedence over the D-pad;
+    // clear_gamepad drops everything.
+    LiveInput d;
+    d.on_gamepad_button(kDpadUp, true);
+    CHECK(d.gamepad_direction() == kDirUp);
+    d.on_gamepad_button(kDpadUp, false);
+    CHECK(d.gamepad_direction() == kDirNone);
+    d.on_gamepad_axis(kLeftY, -0.5f);  // stick up
+    CHECK(d.gamepad_direction() == kDirUp);
+    d.on_gamepad_button(kDpadLeft, true);
+    CHECK(d.gamepad_direction() == kDirUp);  // stick wins
+    d.on_gamepad_axis(kLeftY, 0.0f);
+    CHECK(d.gamepad_direction() == kDirLeft);
+    d.clear_gamepad();
+    CHECK(d.gamepad_direction() == kDirNone);
+    d.on_gamepad_button(kDpadUp, true);
+    d.clear_gamepad();
+    CHECK(d.gamepad_direction() == kDirNone);
+}
+
 static Register r_push("pushwall", test_pushwall);
 static Register r_shoot("shoot_kills", test_shoot_kills);
 static Register r_los("shoot_los_and_ghost", test_shoot_los_and_ghost);
@@ -756,6 +823,7 @@ static Register r_elev("elevator_exit", test_elevator_exit);
 static Register r_coll("collision_wall", test_collision_wall);
 static Register r_kmap("input_keymap", test_input_keymap);
 static Register r_livein("input_live", test_input_live);
+static Register r_gpadin("input_gamepad", test_input_gamepad);
 static Register r_walk("walk_all_maps", test_walk_all_maps);
 
 int main() {

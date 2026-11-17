@@ -14,6 +14,16 @@ Simulation::Simulation(Level level)
       pdx_(level_.pdx),
       pdy_(level_.pdy) {}
 
+// Emit one discrete event for the app to handle (audio, messages, rumble).
+void Simulation::emit(Event::Type type, int sfxIndex, double wx, double wy) {
+    Event e;
+    e.type = type;
+    e.sfxIndex = sfxIndex;
+    e.wx = wx;
+    e.wy = wy;
+    events_.push_back(std::move(e));
+}
+
 // ------------------------------------------------------------- actors
 
 void Simulation::update_actors() {
@@ -156,6 +166,9 @@ void Simulation::collect_cell(int cx, int cy) {
             silver_ = true;         // reference: silver key
         }
         a.removed = true;
+        // WS5: pickup sound at the item's cell.
+        emit(Event::SfxPickup, 2, static_cast<double>(cx) + 0.5,
+             static_cast<double>(cy) + 0.5);
     }
 }
 
@@ -180,6 +193,9 @@ void Simulation::do_activate() {
     if (m0 == 21 && dx != 0) {
         // elevator shaft wall (textures 40/41): exit the level
         completed_ = true;
+        // WS5: level exit sound.
+        emit(Event::SfxLevelExit, 4, static_cast<double>(cx) + 0.5,
+             static_cast<double>(cy) + 0.5);
         return;
     }
     if (90 <= m0 && m0 <= 101) {
@@ -207,6 +223,9 @@ void Simulation::do_activate() {
         }
         door_timers_.push_back({static_cast<std::uint16_t>(cx),
                                 static_cast<std::uint16_t>(cy), 0, was_blocking});
+        // WS5: door sound (open or close) at the door's cell.
+        emit(Event::SfxDoor, 1, static_cast<double>(cx) + 0.5,
+             static_cast<double>(cy) + 0.5);
     } else if (m1 == 98) {
         // pushwall: must be able to move into the cell behind it
         const bool has_timer = std::any_of(wall_timers_.begin(), wall_timers_.end(),
@@ -234,6 +253,8 @@ void Simulation::do_shoot() {
     if (weapon_ticks_ > 0)
         return;  // reference: only when the weapon animation is idle
     weapon_ticks_ = kWeaponCooldown;
+    // WS5: weapon fire sound at the player's position.
+    emit(Event::SfxWeapon, 0, px_, py_);
     const double d = ray_distance(px_, py_, pdx_, pdy_);
 
     // reference: stable-sort things by rx descending, iterate in reverse
@@ -266,6 +287,8 @@ void Simulation::do_shoot() {
             a->def && a->def->killable) {
             a->alive = false;
             score_.kills += 1;
+            // WS5: enemy death sound at the enemy's position.
+            emit(Event::SfxEnemyDie, 3, a->wx(), a->wy());
             // start the dying animation (reference die())
             a->animating = true;
             a->anim_loop = false;
@@ -315,6 +338,7 @@ double Simulation::ray_distance(double x, double y, double dx, double dy) const 
 // ------------------------------------------------------------- tick
 
 void Simulation::tick(const SimInput& in) {
+    events_.clear();  // events() reports the most recent tick only
     if (completed_)
         return;  // reference: loadNextLevel(); headless: freeze
     ++tick_count_;
